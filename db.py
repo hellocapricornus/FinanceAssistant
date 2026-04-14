@@ -5,7 +5,7 @@ import os
 import time
 import re
 
-DB_PATH = "bot.db"
+DB_PATH = "finance_assistant.db"
 if not os.path.isabs(DB_PATH):
     DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), DB_PATH)
 
