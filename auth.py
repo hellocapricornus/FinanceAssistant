@@ -8,7 +8,7 @@ from telegram.ext import ContextTypes  # 可选，如果需要的话
 OWNER_ID = 8107909168  # 控制人ID
 
 # 确定数据库路径 (必须与 db.py 一致)
-DB_PATH = "bot.db"
+DB_PATH = "finance_assistant.db"
 if not os.path.isabs(DB_PATH):
     DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), DB_PATH)
 
