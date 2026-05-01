@@ -41,7 +41,7 @@ from handlers.profile import (
     profile_toggle_notify, profile_signature_start, profile_signature_input,
     profile_contact, profile_feedback_start, profile_feedback_input,
     profile_export_data, profile_back, profile_report_toggle,
-    SET_SIGNATURE, FEEDBACK
+    SET_SIGNATURE, FEEDBACK, profile_monitor_group
 )
 from handlers.operator import add_admin_cmd, remove_admin_cmd, list_admins_cmd, get_admin_list_text
 from db_manager import close_all_connections, init_admin_db, get_conn, get_db
@@ -1803,6 +1803,7 @@ def main():
             CallbackQueryHandler(profile_feedback_start, pattern="^profile_feedback$"),
             CallbackQueryHandler(profile_export_data, pattern="^profile_export$"),
             CallbackQueryHandler(profile_report_toggle, pattern="^profile_report_toggle$"),
+            CallbackQueryHandler(profile_monitor_group, pattern="^profile_monitor_group$"),
         ],
         states={
             SET_SIGNATURE: [MessageHandler(filters.TEXT, profile_signature_input)],
