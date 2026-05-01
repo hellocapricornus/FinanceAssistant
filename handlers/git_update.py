@@ -1,8 +1,7 @@
-cat > /root/FinanceBot/FinanceAssistant/handlers/git_update.py << 'EOF'
+# handlers/git_update.py
 import subprocess
 import os
 import sys
-import time
 import asyncio
 from telegram import Update
 from telegram.ext import ContextTypes, CommandHandler
@@ -30,7 +29,6 @@ def restart_bot():
     """重启机器人 - 使用 systemctl"""
     try:
         print(f"[重启] 正在重启机器人...")
-        # ✅ 改为新机器人的服务名
         result = subprocess.run(
             ['systemctl', 'restart', 'finance-bot'],
             capture_output=True,
@@ -90,14 +88,12 @@ async def git_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await update.message.reply_text("🔍 正在检查状态...")
     git_root = get_git_root()
     try:
-        result = subprocess.run(['git', 'status', '--short'], cwd=git_root, capture_output=True, text=True)
-        status_output = result.stdout.strip()
-        branch_result = subprocess.run(['git', 'branch', '--show-current'], cwd=git_root, capture_output=True, text=True)
-        current_branch = branch_result.stdout.strip()
+        branch = subprocess.run(['git', 'branch', '--show-current'], cwd=git_root, capture_output=True, text=True)
+        status = subprocess.run(['git', 'status', '--short'], cwd=git_root, capture_output=True, text=True)
         
-        message = f"📊 **Git 状态**\n\n🌿 当前分支：`{current_branch}`\n\n"
-        if status_output:
-            message += f"📝 本地修改：\n```\n{status_output[:300]}\n```"
+        message = f"📊 **Git 状态**\n\n🌿 分支：`{branch.stdout.strip()}`\n\n"
+        if status.stdout.strip():
+            message += f"📝 本地修改：\n```\n{status.stdout[:300]}\n```"
         else:
             message += "✅ 工作区干净"
         await status_msg.edit_text(message, parse_mode='Markdown')
@@ -114,9 +110,9 @@ async def git_branch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     git_root = get_git_root()
     try:
         result = subprocess.run(['git', 'branch', '-a'], cwd=git_root, capture_output=True, text=True)
-        branches = result.stdout.strip().split('\n')
+        branches = result.stdout.strip().split('\n')[:20]
         message = "📊 **Git 分支列表**\n\n"
-        for b in branches[:20]:
+        for b in branches:
             if b.startswith('*'):
                 message += f"✅ `{b[1:].strip()}` (当前)\n"
             else:
@@ -132,4 +128,3 @@ def get_git_handlers():
         CommandHandler("gitstatus", git_status),
         CommandHandler("gitbranch", git_branch),
     ]
-EOF
