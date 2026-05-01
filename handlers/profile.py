@@ -88,6 +88,9 @@ async def _build_profile_menu(user_id: int, prefs: dict = None, display_name: st
         status = "🟢 已开启" if report_enabled else "🔴 已关闭"
         keyboard.append([InlineKeyboardButton(f"📋 每日早报 {status}", callback_data="profile_report_toggle")])
         keyboard.append([InlineKeyboardButton("📈 数据分析导出", callback_data="profile_export")])
+    # ✅ 监控群组（除超级管理员外所有用户可见）
+    if user_id != OWNER_ID:
+        keyboard.append([InlineKeyboardButton("📡 监控群组", callback_data="profile_monitor_group")])
     keyboard.append([InlineKeyboardButton("◀️ 返回主菜单", callback_data="profile_back")])
     notify_status = ""
     if full_access and addresses:
@@ -870,3 +873,25 @@ async def profile_report_toggle(update: Update, context: ContextTypes.DEFAULT_TY
         await query.message.edit_text(text, reply_markup=markup, parse_mode="Markdown")
     except Exception:
         pass  # ✅ 忽略 Message is not modified 错误
+
+async def profile_monitor_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """监控群组介绍"""
+    query = update.callback_query
+    await query.answer()
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔗 加入监控群组", url="https://t.me/+BjHkQhpqknczYjk5")],
+        [InlineKeyboardButton("◀️ 返回个人中心", callback_data="profile_return")],
+    ])
+
+    await query.edit_message_text(
+        "📡 **监控群组**\n\n"
+        "监控群组是一个专属的 Telegram 群组，机器人会自动监控并转发以下信息：\n\n"
+        "🔍 **新币上线监控** - 自动爬取新币上线的公告消息\n"
+        "👥 **客户信息捕获** - 及时查看群组动态，不漏掉任何潜在客户\n"
+        "⚡ **实时推送** - 第一时间获取最新币圈动态和客户线索\n\n"
+        "🎁 **新用户福利**：加入即可获得 **24 小时免费试用**！\n\n"
+        "👉 点击下方按钮加入群组，开始监控吧！",
+        parse_mode="Markdown",
+        reply_markup=keyboard
+    )
