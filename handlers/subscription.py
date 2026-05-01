@@ -1325,6 +1325,8 @@ async def check_subscription_payments(app):
                         "UPDATE payment_orders SET status = 'paid', tx_id = ?, paid_at = ? WHERE order_id = ?",
                         (tx_id, now, order["order_id"])
                     )
+                    # ✅ 释放地址
+                    conn.execute("UPDATE payment_addresses SET status = 'idle' WHERE address = ?", (order["payment_address"],))
 
                     plan = conn.execute(
                         "SELECT * FROM subscription_plans WHERE plan_id = ?", (order["plan_id"],)
