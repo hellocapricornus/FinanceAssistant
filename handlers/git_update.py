@@ -1,3 +1,4 @@
+cat > /root/FinanceBot/FinanceAssistant/handlers/git_update.py << 'EOF'
 import subprocess
 import os
 import sys
@@ -7,12 +8,10 @@ from telegram import Update
 from telegram.ext import ContextTypes, CommandHandler
 from config import OWNER_ID
 
-# 默认的远程仓库和分支
 DEFAULT_REMOTE = "origin"
 DEFAULT_BRANCH = "main"
 
 def get_git_root():
-    """获取 git 仓库根目录"""
     try:
         result = subprocess.run(
             ['git', 'rev-parse', '--show-toplevel'],
@@ -28,28 +27,29 @@ def get_git_root():
 
 
 def restart_bot():
-    """重启机器人 - 本地测试版本"""
+    """重启机器人 - 使用 systemctl"""
     try:
         print(f"[重启] 正在重启机器人...")
-        
-        # 本地测试：只打印重启信息，不实际重启
-        print(f"[重启] 模拟重启（本地测试环境）")
-        
-        # 如果要真正重启，使用 pkill
-        # subprocess.run(['pkill', '-f', 'python3.*main.py'])
-        # time.sleep(2)
-        # subprocess.Popen(['python3', 'main.py'])
-        
-        sys.exit(0)
+        # ✅ 改为新机器人的服务名
+        result = subprocess.run(
+            ['systemctl', 'restart', 'finance-bot'],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        if result.returncode == 0:
+            print(f"[重启] 重启成功")
+            sys.exit(0)
+        else:
+            print(f"[重启] systemctl 失败: {result.stderr}")
+            sys.exit(1)
     except Exception as e:
         print(f"[重启] 重启失败: {e}")
         sys.exit(1)
 
 
 async def git_pull(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """执行 git pull 更新代码并自动重启"""
     user_id = update.effective_user.id
-
     if user_id != OWNER_ID:
         await update.message.reply_text("❌ 只有超级管理员可以使用此命令")
         return
@@ -58,42 +58,6 @@ async def git_pull(update: Update, context: ContextTypes.DEFAULT_TYPE):
     git_root = get_git_root()
 
     try:
-        branch_result = subprocess.run(
-            ['git', 'branch', '--show-current'],
-            cwd=git_root,
-            capture_output=True,
-            text=True
-        )
-        current_branch = branch_result.stdout.strip()
-
-        if not current_branch:
-            await status_msg.edit_text("❌ 无法获取当前分支")
-            return
-
-        tracking_result = subprocess.run(
-            ['git', 'rev-parse', '--abbrev-ref', f'{current_branch}@{{upstream}}'],
-            cwd=git_root,
-            capture_output=True,
-            text=True
-        )
-
-        if tracking_result.returncode != 0:
-            set_upstream = subprocess.run(
-                ['git', 'branch', '--set-upstream-to', f'{DEFAULT_REMOTE}/{current_branch}', current_branch],
-                cwd=git_root,
-                capture_output=True,
-                text=True
-            )
-
-            if set_upstream.returncode != 0:
-                await status_msg.edit_text(
-                    f"⚠️ 当前分支 `{current_branch}` 没有设置上游跟踪\n\n"
-                    f"请手动执行：\n"
-                    f"```\ngit branch --set-upstream-to={DEFAULT_REMOTE}/{current_branch}\n```",
-                    parse_mode='Markdown'
-                )
-                return
-
         result = subprocess.run(
             ['git', 'pull'],
             cwd=git_root,
@@ -101,28 +65,16 @@ async def git_pull(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text=True,
             timeout=30
         )
-
         if result.returncode == 0:
             output = result.stdout.strip()
             if "Already up to date" in output:
                 await status_msg.edit_text("✅ 代码已是最新，无需更新")
             else:
-                await status_msg.edit_text(
-                    f"✅ 代码更新成功！\n\n"
-                    f"```\n{output[:500]}\n```\n"
-                    f"🔄 正在重启机器人...",
-                    parse_mode='Markdown'
-                )
-
+                await status_msg.edit_text("✅ 代码更新成功！\n\n🔄 正在重启机器人...", parse_mode='Markdown')
                 await asyncio.sleep(2)
                 restart_bot()
         else:
-            error = result.stderr.strip()
-            await status_msg.edit_text(
-                f"❌ 更新失败：\n\n"
-                f"```\n{error[:500]}\n```",
-                parse_mode='Markdown'
-            )
+            await status_msg.edit_text(f"❌ 更新失败：\n```\n{result.stderr[:500]}\n```", parse_mode='Markdown')
     except subprocess.TimeoutExpired:
         await status_msg.edit_text("❌ 更新超时，请稍后重试")
     except Exception as e:
@@ -130,141 +82,54 @@ async def git_pull(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def git_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """查看 git 状态"""
     user_id = update.effective_user.id
-
     if user_id != OWNER_ID:
         await update.message.reply_text("❌ 只有超级管理员可以使用此命令")
         return
 
     status_msg = await update.message.reply_text("🔍 正在检查状态...")
     git_root = get_git_root()
-
     try:
-        branch_result = subprocess.run(
-            ['git', 'branch', '--show-current'],
-            cwd=git_root,
-            capture_output=True,
-            text=True
-        )
+        result = subprocess.run(['git', 'status', '--short'], cwd=git_root, capture_output=True, text=True)
+        status_output = result.stdout.strip()
+        branch_result = subprocess.run(['git', 'branch', '--show-current'], cwd=git_root, capture_output=True, text=True)
         current_branch = branch_result.stdout.strip()
-
-        remote_result = subprocess.run(
-            ['git', 'remote', '-v'],
-            cwd=git_root,
-            capture_output=True,
-            text=True
-        )
-        remote_info = remote_result.stdout.strip().split('\n')[0] if remote_result.stdout else "未配置"
-
-        status_result = subprocess.run(
-            ['git', 'status', '--short'],
-            cwd=git_root,
-            capture_output=True,
-            text=True
-        )
-        status_output = status_result.stdout.strip()
-
-        tracking_result = subprocess.run(
-            ['git', 'rev-parse', '--abbrev-ref', f'{current_branch}@{{upstream}}'],
-            cwd=git_root,
-            capture_output=True,
-            text=True
-        )
-        has_upstream = tracking_result.returncode == 0
-        upstream_branch = tracking_result.stdout.strip() if has_upstream else "未设置"
-
-        subprocess.run(['git', 'fetch'], cwd=git_root, capture_output=True, text=True)
-
-        message = f"📊 **Git 状态**\n\n"
-        message += f"🌿 当前分支：`{current_branch}`\n"
-        message += f"🔗 远程仓库：`{remote_info[:50]}`\n"
-        message += f"📡 上游分支：`{upstream_branch}`\n\n"
-
+        
+        message = f"📊 **Git 状态**\n\n🌿 当前分支：`{current_branch}`\n\n"
         if status_output:
-            changed_files = len(status_output.split('\n'))
-            message += f"📝 **本地修改：** {changed_files} 个文件有变更\n"
-            message += f"```\n{status_output[:300]}\n```\n"
+            message += f"📝 本地修改：\n```\n{status_output[:300]}\n```"
         else:
-            message += f"✅ 工作区干净，无本地修改\n\n"
-
-        if has_upstream:
-            behind = subprocess.run(
-                ['git', 'rev-list', '--count', f'{upstream_branch}..{current_branch}'],
-                cwd=git_root,
-                capture_output=True,
-                text=True
-            )
-            behind_count = int(behind.stdout.strip() or 0)
-
-            ahead = subprocess.run(
-                ['git', 'rev-list', '--count', f'{current_branch}..{upstream_branch}'],
-                cwd=git_root,
-                capture_output=True,
-                text=True
-            )
-            ahead_count = int(ahead.stdout.strip() or 0)
-
-            if ahead_count > 0:
-                message += f"🔄 远程有 {ahead_count} 个新提交可以拉取\n"
-                message += f"💡 使用 `/gitpull` 拉取更新"
-            elif behind_count > 0:
-                message += f"📤 本地有 {behind_count} 个提交未推送"
-            else:
-                message += f"✅ 已是最新版本"
-        else:
-            message += f"⚠️ 未设置上游分支，无法检查远程更新\n"
-            message += f"💡 请手动执行：`git branch --set-upstream-to={DEFAULT_REMOTE}/{current_branch}`"
-
+            message += "✅ 工作区干净"
         await status_msg.edit_text(message, parse_mode='Markdown')
-
     except Exception as e:
         await status_msg.edit_text(f"❌ 检查失败：{str(e)}")
 
 
 async def git_branch(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """查看所有分支"""
     user_id = update.effective_user.id
-
     if user_id != OWNER_ID:
         await update.message.reply_text("❌ 只有超级管理员可以使用此命令")
         return
-
     status_msg = await update.message.reply_text("🔍 正在获取分支列表...")
     git_root = get_git_root()
-
     try:
-        branch_result = subprocess.run(
-            ['git', 'branch', '-a'],
-            cwd=git_root,
-            capture_output=True,
-            text=True
-        )
-
-        branches = branch_result.stdout.strip().split('\n')
-
-        for i, b in enumerate(branches):
+        result = subprocess.run(['git', 'branch', '-a'], cwd=git_root, capture_output=True, text=True)
+        branches = result.stdout.strip().split('\n')
+        message = "📊 **Git 分支列表**\n\n"
+        for b in branches[:20]:
             if b.startswith('*'):
-                branches[i] = f"✅ `{b[1:].strip()}` (当前)"
+                message += f"✅ `{b[1:].strip()}` (当前)\n"
             else:
-                branches[i] = f"   `{b.strip()}`"
-
-        message = f"📊 **Git 分支列表**\n\n"
-        message += "\n".join(branches[:30])
-
-        if len(branches) > 30:
-            message += f"\n\n... 还有 {len(branches) - 30} 个分支未显示"
-
+                message += f"   `{b.strip()}`\n"
         await status_msg.edit_text(message, parse_mode='Markdown')
-
     except Exception as e:
         await status_msg.edit_text(f"❌ 获取分支失败：{str(e)}")
 
 
 def get_git_handlers():
-    """返回 git 相关的命令处理器"""
     return [
         CommandHandler("gitpull", git_pull),
         CommandHandler("gitstatus", git_status),
         CommandHandler("gitbranch", git_branch),
     ]
+EOF
