@@ -1927,7 +1927,8 @@ async def handle_set_per_transaction_fee(update: Update, context: ContextTypes.D
 async def handle_add_income(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                             amount: float, is_correction: bool = False,
                             category: str = "", temp_rate: float = None,
-                            temp_fee: float = None, admin_id: int = 0):
+                            temp_fee: float = None, temp_per_fee: float = None, 
+                            admin_id: int = 0):
     if not is_authorized(update.effective_user.id, require_full_access=False):
         await update.message.reply_text("❌ 此操作需要管理员权限")
         return
@@ -1939,10 +1940,32 @@ async def handle_add_income(update: Update, context: ContextTypes.DEFAULT_TYPE,
     message_id = update.message.message_id
     cur_admin_id = get_user_admin_id(user.id)
     am = get_accounting_manager(cur_admin_id)
+    
+    # 🔥 如果有临时单笔费用，先临时修改
+    original_per_fee = None
+    if temp_per_fee is not None:
+        session = am.get_or_create_session(group_id, cur_admin_id)
+        original_per_fee = session.get('per_transaction_fee', 0)
+        am.set_per_transaction_fee(group_id, temp_per_fee, cur_admin_id)
+
+    # 🔥 如果有临时手续费，先临时修改
+    original_fee = None
+    if temp_fee is not None:
+        session = am.get_or_create_session(group_id, cur_admin_id)
+        original_fee = session.get('fee_rate', 0)
+        am.set_fee_rate(group_id, temp_fee, cur_admin_id)
+
     success, _ = am.add_record(
         group_id, user.id, username, 'income', record_amount, desc,
         category, temp_rate, message_id, temp_fee, cur_admin_id
     )
+
+    # 🔥 恢复原始值
+    if original_fee is not None:
+        am.set_fee_rate(group_id, original_fee, cur_admin_id)
+    if original_per_fee is not None:
+        am.set_per_transaction_fee(group_id, original_per_fee, cur_admin_id)
+
     if success:
         stats = am.get_current_stats(group_id, admin_id=cur_admin_id)
         records = am.get_current_records(group_id, admin_id=cur_admin_id)
@@ -1955,6 +1978,8 @@ async def handle_add_income(update: Update, context: ContextTypes.DEFAULT_TYPE,
             temp_info.append(f"临时手续费：{temp_fee}%")
         if temp_rate is not None:
             temp_info.append(f"临时汇率：{temp_rate}")
+        if temp_per_fee is not None:  # 🔥 新增提示
+            temp_info.append(f"临时单笔费用：{temp_per_fee}元")
         if temp_info:
             prefix += f" ({', '.join(temp_info)})"
         await update.message.reply_text(f"{prefix} \n\n{message}", parse_mode='Markdown')
@@ -3302,6 +3327,8 @@ async def handle_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`+1000 德国` 带分类\n"
         "`+1000/7.2` 临时汇率\n"
         "`+1000*5` 临时费率\n"
+        "`+1000#2` 临时单笔费用\n"              # 🔥 新增
+        "`+1000*5/7.2#2 德国` 完整格式\n"       # 🔥 新增
         "`+1000*5/7.2 德国` 临时费率+汇率+分类\n"
         "`-500` 修正入款\n\n"
         "💸 **出款操作**\n"
@@ -3464,8 +3491,33 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             content = text[1:].strip()
             temp_rate = None
             temp_fee = None
+            temp_per_fee = None  # 🔥 新增
             category = ""
             amount_str = content
+
+            # 🔥 先检查是否包含 # 号（临时单笔费用）
+            if '#' in content:
+                hash_index = content.index('#')
+                before_hash = content[:hash_index]
+                after_hash = content[hash_index + 1:]
+
+                per_fee_match = re.match(r'^(\d+(?:\.\d+)?)', after_hash)
+                if per_fee_match:
+                    temp_per_fee = float(per_fee_match.group(1))
+                    remaining = after_hash[per_fee_match.end():].strip()
+                    if remaining and not category:
+                        category = remaining
+                else:
+                    await message.reply_text("❌ 单笔费用格式错误：#数字 或 #数字 备注")
+                    return
+
+                content = before_hash.strip()
+                if not content:
+                    await message.reply_text("❌ # 前面需要输入金额")
+                    return
+                amount_str = content
+                
+            # 检查是否包含 * 号（临时手续费）
             if '*' in content:
                 star_parts = content.split('*', 1)
                 amount_str = star_parts[0].strip()
@@ -3482,7 +3534,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                         temp_rate = float(rate_part_clean)
                     except ValueError:
                         temp_rate = None
-                    if ' ' in rate_part:
+                    if ' ' in rate_part and not category:
                         category = rate_part.split(' ', 1)[1].strip()
                 else:
                     fee_part = rest.split(' ', 1)[0].strip()
@@ -3491,27 +3543,31 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                         temp_fee = float(temp_fee_str)
                     except ValueError:
                         temp_fee = None
-                    if ' ' in rest:
+                    if ' ' in rest and not category:
                         category = rest.split(' ', 1)[1].strip()
             elif '/' in content:
                 parts = content.split('/', 1)
                 amount_str = parts[0].strip()
                 rest = parts[1].strip()
                 if ' ' in rest:
-                    rate_part, category = rest.split(' ', 1)
+                    rate_part, cat = rest.split(' ', 1)
                     try:
                         temp_rate = float(rate_part)
+                        if not category:
+                            category = cat
                     except ValueError:
-                        category = rest
+                        if not category:
+                            category = rest
                         temp_rate = None
                 else:
                     try:
                         temp_rate = float(rest)
                     except ValueError:
-                        category = rest
+                        if not category:
+                            category = rest
                         temp_rate = None
             else:
-                if ' ' in amount_str:
+                if ' ' in amount_str and not category:
                     parts = amount_str.split(' ', 1)
                     amount_str = parts[0]
                     category = parts[1]
@@ -3519,7 +3575,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 amount = float(amount_str)
                 await handle_add_income(update, context, amount, is_correction=False,
                        category=category, temp_rate=temp_rate, temp_fee=temp_fee,
-                       admin_id=admin_id)
+                       temp_per_fee=temp_per_fee, admin_id=admin_id)  # 🔥 传递 temp_per_fee
             else:
                 await message.reply_text("❌ 格式错误：+金额 或 +金额*手续费% 或 +金额/汇率 或 +金额*手续费%/汇率 或 +金额 备注")
         except ValueError:
@@ -3533,8 +3589,32 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             content = text[1:].strip()
             temp_rate = None
             temp_fee = None
+            temp_per_fee = None  # 🔥 新增
             category = ""
             amount_str = content
+            # 🔥 先检查是否包含 # 号（临时单笔费用）
+            if '#' in content:
+                hash_index = content.index('#')
+                before_hash = content[:hash_index]
+                after_hash = content[hash_index + 1:]
+
+                per_fee_match = re.match(r'^(\d+(?:\.\d+)?)', after_hash)
+                if per_fee_match:
+                    temp_per_fee = float(per_fee_match.group(1))
+                    remaining = after_hash[per_fee_match.end():].strip()
+                    if remaining and not category:
+                        category = remaining
+                else:
+                    await message.reply_text("❌ 单笔费用格式错误：#数字 或 #数字 备注")
+                    return
+
+                content = before_hash.strip()
+                if not content:
+                    await message.reply_text("❌ # 前面需要输入金额")
+                    return
+                amount_str = content
+                
+            # 检查是否包含 * 号（临时手续费）
             if '*' in content:
                 star_parts = content.split('*', 1)
                 amount_str = star_parts[0].strip()
@@ -3551,7 +3631,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                         temp_rate = float(rate_part_clean)
                     except ValueError:
                         temp_rate = None
-                    if ' ' in rate_part:
+                    if ' ' in rate_part and not category:
                         category = rate_part.split(' ', 1)[1].strip()
                 else:
                     fee_part = rest.split(' ', 1)[0].strip()
@@ -3560,27 +3640,31 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                         temp_fee = float(temp_fee_str)
                     except ValueError:
                         temp_fee = None
-                    if ' ' in rest:
+                    if ' ' in rest and not category:
                         category = rest.split(' ', 1)[1].strip()
             elif '/' in content:
                 parts = content.split('/', 1)
                 amount_str = parts[0].strip()
                 rest = parts[1].strip()
                 if ' ' in rest:
-                    rate_part, category = rest.split(' ', 1)
+                    rate_part, cat = rest.split(' ', 1)  # ✅ 用 cat
                     try:
                         temp_rate = float(rate_part)
+                        if not category:
+                            category = cat  # ✅ 这里的 cat 在上面定义了
                     except ValueError:
-                        category = rest
+                        if not category:
+                            category = rest
                         temp_rate = None
                 else:
                     try:
                         temp_rate = float(rest)
                     except ValueError:
-                        category = rest
+                        if not category:
+                            category = rest
                         temp_rate = None
             else:
-                if ' ' in amount_str:
+                if ' ' in amount_str and not category:
                     parts = amount_str.split(' ', 1)
                     amount_str = parts[0]
                     category = parts[1]
@@ -3588,7 +3672,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 amount = float(amount_str)
                 await handle_add_income(update, context, amount, is_correction=True,
                        category=category, temp_rate=temp_rate, temp_fee=temp_fee,
-                       admin_id=admin_id)
+                       temp_per_fee=temp_per_fee, admin_id=admin_id)  # 🔥 传递 temp_per_fee
             else:
                 await message.reply_text("❌ 格式错误：-金额 或 -金额*手续费% 或 -金额/汇率 或 -金额*手续费%/汇率 或 -金额 备注")
         except ValueError:
