@@ -3292,10 +3292,11 @@ def get_conversation_handler():
 
 async def handle_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from telegram import ReplyKeyboardMarkup, KeyboardButton
-    keyboard = [[KeyboardButton("◀️ 返回主菜单")]]
+    keyboard = [
+        [KeyboardButton("➕ 添加我进群"), KeyboardButton("◀️ 返回主菜单")]
+    ]
     message = (
         "📒 **记账功能说明**\n\n"
-        f"➕ **[点击这里添加机器人到你的群组](https://t.me/jizhangtextjibot?startgroup=start)**\n\n"
         "💰 **入款操作**\n"
         "`+1000` 普通入款\n"
         "`+1000 德国` 带分类\n"
