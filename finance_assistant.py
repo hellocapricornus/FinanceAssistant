@@ -864,6 +864,10 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
     print(f"[BUTTON_ROUTER] 收到: {data}")
+    if data == "view_current_bill":
+        from handlers.accounting import handle_view_current_bill
+        await handle_view_current_bill(update, context)
+        return
     if data.startswith("op_"):
         await operator.handle_buttons(update, context)
         return
