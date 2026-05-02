@@ -631,7 +631,7 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
 '''
             for r in data['income']:
                 dt = beijing_time(r['created_at'])
-                time_str = dt.strftime('%H:%M:%S')
+                time_str = dt.strftime('%m-%d %H:%M')
 
                 # 获取费率和汇率
                 fee_rate = r.get('fee_rate', 0)
@@ -693,7 +693,7 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
 '''
             for r in data['expense']:
                 dt = beijing_time(r['created_at'])
-                time_str = dt.strftime('%H:%M:%S')
+                time_str = dt.strftime('%m-%d %H:%M')
                 operator = r.get('display_name', '未知')
                 html += f'''
                         <tr>
@@ -1688,7 +1688,7 @@ def is_valid_address(text: str) -> tuple:
 def _format_record_line(record: Dict) -> str:
     """格式化单条记录"""
     dt = beijing_time(record['created_at'])
-    time_str = dt.strftime('%m-%d %H:%M')
+    time_str = dt.strftime('%H:%M')
     amount = record['amount']
     amount_usdt = record['amount_usdt']
     rate = record.get('rate', 0)
@@ -1733,7 +1733,7 @@ def format_bill_message(stats: Dict, records: List[Dict], title: str = "当前�
         if no_category_records:
             for r in no_category_records[:MAX_DISPLAY_RECORDS]:
                 dt = beijing_time(r['created_at'])
-                time_str = dt.strftime('%m-%d %H:%M')
+                time_str = dt.strftime('%H:%M')
                 amount = r['amount']
                 amount_usdt = r['amount_usdt']
                 fee_rate = r.get('fee_rate', 0)
@@ -1756,7 +1756,7 @@ def format_bill_message(stats: Dict, records: List[Dict], title: str = "当前�
             message += f"\n{display_category} ({len(group_records)} 笔)\n"
             for r in group_sorted[:MAX_DISPLAY_RECORDS]:
                 dt = beijing_time(r['created_at'])
-                time_str = dt.strftime('%m-%d %H:%M')
+                time_str = dt.strftime('%H:%M')
                 amount = r['amount']
                 amount_usdt = r['amount_usdt']
                 fee_rate = r.get('fee_rate', 0)
@@ -1789,7 +1789,7 @@ def format_bill_message(stats: Dict, records: List[Dict], title: str = "当前�
             message += f" (显示最新{MAX_DISPLAY_RECORDS}条)\n"
         for r in display_expense:
             dt = beijing_time(r['created_at'])
-            time_str = dt.strftime('%m-%d %H:%M')
+            time_str = dt.strftime('%H:%M')
             amount = r['amount']
             amount_usdt = r['amount_usdt']
             operator = r.get('display_name', '未知用户')
@@ -1927,8 +1927,7 @@ async def handle_set_per_transaction_fee(update: Update, context: ContextTypes.D
 async def handle_add_income(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                             amount: float, is_correction: bool = False,
                             category: str = "", temp_rate: float = None,
-                            temp_fee: float = None, temp_per_fee: float = None, 
-                            admin_id: int = 0):
+                            temp_fee: float = None, admin_id: int = 0):
     if not is_authorized(update.effective_user.id, require_full_access=False):
         await update.message.reply_text("❌ 此操作需要管理员权限")
         return
@@ -1940,32 +1939,10 @@ async def handle_add_income(update: Update, context: ContextTypes.DEFAULT_TYPE,
     message_id = update.message.message_id
     cur_admin_id = get_user_admin_id(user.id)
     am = get_accounting_manager(cur_admin_id)
-    
-    # 🔥 如果有临时单笔费用，先临时修改
-    original_per_fee = None
-    if temp_per_fee is not None:
-        session = am.get_or_create_session(group_id, cur_admin_id)
-        original_per_fee = session.get('per_transaction_fee', 0)
-        am.set_per_transaction_fee(group_id, temp_per_fee, cur_admin_id)
-
-    # 🔥 如果有临时手续费，先临时修改
-    original_fee = None
-    if temp_fee is not None:
-        session = am.get_or_create_session(group_id, cur_admin_id)
-        original_fee = session.get('fee_rate', 0)
-        am.set_fee_rate(group_id, temp_fee, cur_admin_id)
-
     success, _ = am.add_record(
         group_id, user.id, username, 'income', record_amount, desc,
         category, temp_rate, message_id, temp_fee, cur_admin_id
     )
-
-    # 🔥 恢复原始值
-    if original_fee is not None:
-        am.set_fee_rate(group_id, original_fee, cur_admin_id)
-    if original_per_fee is not None:
-        am.set_per_transaction_fee(group_id, original_per_fee, cur_admin_id)
-
     if success:
         stats = am.get_current_stats(group_id, admin_id=cur_admin_id)
         records = am.get_current_records(group_id, admin_id=cur_admin_id)
@@ -1978,11 +1955,17 @@ async def handle_add_income(update: Update, context: ContextTypes.DEFAULT_TYPE,
             temp_info.append(f"临时手续费：{temp_fee}%")
         if temp_rate is not None:
             temp_info.append(f"临时汇率：{temp_rate}")
-        if temp_per_fee is not None:  # 🔥 新增提示
-            temp_info.append(f"临时单笔费用：{temp_per_fee}元")
         if temp_info:
             prefix += f" ({', '.join(temp_info)})"
-        await update.message.reply_text(f"{prefix} \n\n{message}", parse_mode='Markdown')
+        # ✅ 添加内联按钮
+        view_button = InlineKeyboardButton("📊 查看当前账单", callback_data="view_current_bill")
+        reply_markup = InlineKeyboardMarkup([[view_button]])
+
+        await update.message.reply_text(
+            f"{prefix} \n\n{message}", 
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
     else:
         await update.message.reply_text("❌ 记录失败，请稍后重试")
 
@@ -2009,7 +1992,15 @@ async def handle_add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE,
         records = am.get_current_records(group_id, admin_id=cur_admin_id)
         message = format_bill_message(stats, records, "当前账单")
         prefix = f"✅ 已记录修正出款：-{abs(amount):.2f} USDT" if is_correction else f"✅ 已记录出款：{amount:.2f} USDT"
-        await update.message.reply_text(f"{prefix}\n\n{message}", parse_mode='Markdown')
+        # ✅ 添加内联按钮
+        view_button = InlineKeyboardButton("📊 查看当前账单", callback_data="view_current_bill")
+        reply_markup = InlineKeyboardMarkup([[view_button]])
+
+        await update.message.reply_text(
+            f"{prefix}\n\n{message}", 
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
     else:
         await update.message.reply_text("❌ 记录失败，请稍后重试")
 
@@ -2637,7 +2628,7 @@ async def send_bill_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if no_category_records:
             for r in no_category_records:
                 dt = beijing_time(r['created_at'])
-                time_str = dt.strftime('%m-%d %H:%M')
+                time_str = dt.strftime('%H:%M')
                 fee_rate = r.get('fee_rate', 0)
                 rate = r.get('rate', 0)
                 fee_info = format_fee_info(fee_rate, rate)
@@ -2653,7 +2644,7 @@ async def send_bill_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message += f"{display_category} ({len(group_records)} 笔)\n"
             for r in group_records:
                 dt = beijing_time(r['created_at'])
-                time_str = dt.strftime('%m-%d %H:%M')
+                time_str = dt.strftime('%H:%M')
                 fee_rate = r.get('fee_rate', 0)
                 rate = r.get('rate', 0)
                 fee_info = format_fee_info(fee_rate, rate)
@@ -2673,7 +2664,7 @@ async def send_bill_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message += f"📉 **出款 {len(expense_records)} 笔**\n"
         for r in expense_records:
             dt = beijing_time(r['created_at'])
-            time_str = dt.strftime('%m-%d %H:%M')
+            time_str = dt.strftime('%H:%M')
             amount_usdt = r['amount_usdt']
             display_name = r.get('display_name', '未知用户')
             user_id = r.get('user_id')
@@ -3269,6 +3260,383 @@ def get_service_message_handler():
         handle_group_service_message
     )
 
+# ===== 在 accounting.py 文件中，找到 def get_conversation_handler(): =====
+# ===== 在它之前添加以下全部代码 =====
+
+# ---------- 美化 HTML 账单生成 ----------
+
+def generate_beautiful_bill_html(stats: Dict, records: List[Dict], title: str = "当前账单") -> str:
+    """
+    生成美化版 HTML 账单
+
+    Args:
+        stats: 统计信息字典
+        records: 记账记录列表
+        title: 账单标题
+    Returns:
+        HTML 字符串
+    """
+    from datetime import datetime
+
+    # 分离入款和出款
+    income_records = [r for r in records if r['type'] == 'income']
+    expense_records = [r for r in records if r['type'] == 'expense']
+
+    # 按备注分组
+    categories = {}
+    no_category_records = []
+    for r in income_records:
+        category = r.get('category', '') or ''
+        if category:
+            if category not in categories:
+                categories[category] = []
+            categories[category].append(r)
+        else:
+            no_category_records.append(r)
+
+    # 统计数据
+    fee_rate = stats.get('fee_rate', 0)
+    exchange_rate = stats.get('exchange_rate', 1)
+    per_transaction_fee = stats.get('per_transaction_fee', 0)
+    total_income_cny = stats.get('income_total', 0)
+    total_income_usdt = stats.get('income_usdt', 0)
+    total_expense_usdt = stats.get('expense_usdt', 0)
+    pending_usdt = total_income_usdt - total_expense_usdt
+
+    now = datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')
+
+    def get_flag(cat):
+        if not cat:
+            return ''
+        cat_lower = cat.lower().strip()
+        if cat_lower in COUNTRY_FLAGS:
+            return COUNTRY_FLAGS[cat_lower]
+        for country, flag in COUNTRY_FLAGS.items():
+            if country in cat_lower or cat_lower in country:
+                return flag
+        return ''
+
+    def fmt(num, decimals=2):
+        if num == int(num):
+            return str(int(num))
+        return f"{num:.{decimals}f}"
+
+    # 生成表格行
+    income_rows = ""
+    for r in income_records:
+        dt = beijing_time(r['created_at'])
+        time_str = dt.strftime('%m-%d %H:%M')
+        cat = r.get('category', '') or ''
+        flag = get_flag(cat)
+        cat_display = f"{flag} {cat}" if flag else (cat or '无')
+        fee_info = f"{fmt(r.get('fee_rate', 0))}% / {fmt(r.get('rate', 0))}"
+        operator = r.get('display_name', r.get('username', '未知'))
+        income_rows += f"""
+        <tr>
+            <td>{time_str}</td>
+            <td class="income-amount">+{fmt(r['amount'])}</td>
+            <td>{fee_info}</td>
+            <td class="usdt-amount">{fmt(r['amount_usdt'])} USDT</td>
+            <td>{cat_display}</td>
+            <td>{operator}</td>
+        </tr>"""
+
+    expense_rows = ""
+    for r in expense_records:
+        dt = beijing_time(r['created_at'])
+        time_str = dt.strftime('%m-%d %H:%M')
+        operator = r.get('display_name', r.get('username', '未知'))
+        expense_rows += f"""
+        <tr>
+            <td>{time_str}</td>
+            <td class="expense-amount">-{fmt(r['amount_usdt'])} USDT</td>
+            <td>{operator}</td>
+        </tr>"""
+
+    # 分组统计
+    group_stats = ""
+    if categories:
+        for cat, group_records in categories.items():
+            cat_cny = sum(r['amount'] for r in group_records)
+            cat_usdt = sum(r['amount_usdt'] for r in group_records)
+            flag = get_flag(cat)
+            cat_display = f"{flag} {cat}" if flag else cat
+            group_stats += f"""
+            <tr>
+                <td>{cat_display}</td>
+                <td>{len(group_records)}笔</td>
+                <td>{fmt(cat_cny)} 元</td>
+                <td>{fmt(cat_usdt)} USDT</td>
+            </tr>"""
+
+    category_section = ""
+    if group_stats:
+        category_section = f"""
+        <div class="card">
+            <h2>📊 入款分组统计</h2>
+            <table>
+                <thead>
+                    <tr><th>分类</th><th>笔数</th><th>金额(元)</th><th>金额(USDT)</th></tr>
+                </thead>
+                <tbody>{group_stats}</tbody>
+            </table>
+        </div>"""
+
+    html = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{title} - 记账账单</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }}
+        .container {{ max-width: 900px; margin: 0 auto; }}
+        .header {{
+            background: white;
+            border-radius: 20px;
+            padding: 28px 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+            text-align: center;
+        }}
+        .header h1 {{
+            font-size: 26px;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 8px;
+        }}
+        .header .time {{ color: #888; font-size: 13px; }}
+        .summary-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 20px;
+        }}
+        .summary-card {{
+            background: white;
+            border-radius: 16px;
+            padding: 20px;
+            text-align: center;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+            transition: transform 0.2s;
+        }}
+        .summary-card:hover {{ transform: translateY(-2px); }}
+        .summary-card .icon {{ font-size: 28px; margin-bottom: 8px; }}
+        .summary-card .label {{ font-size: 12px; color: #888; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 1px; }}
+        .summary-card .value {{ font-size: 24px; font-weight: 700; }}
+        .summary-card.income {{ border-bottom: 4px solid #10b981; }}
+        .summary-card.income .value {{ color: #10b981; }}
+        .summary-card.expense {{ border-bottom: 4px solid #ef4444; }}
+        .summary-card.expense .value {{ color: #ef4444; }}
+        .summary-card.pending {{ border-bottom: 4px solid #f59e0b; }}
+        .summary-card.pending .value {{ color: #f59e0b; }}
+        .config-bar {{
+            background: white;
+            border-radius: 16px;
+            padding: 16px 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+            display: flex;
+            justify-content: space-around;
+            flex-wrap: wrap;
+            gap: 12px;
+            text-align: center;
+        }}
+        .config-item .config-label {{ font-size: 11px; color: #888; margin-bottom: 4px; }}
+        .config-item .config-value {{ font-size: 18px; font-weight: 600; color: #333; }}
+        .card {{
+            background: white;
+            border-radius: 16px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+        }}
+        .card h2 {{
+            font-size: 18px;
+            color: #1e293b;
+            margin-bottom: 16px;
+            padding-bottom: 12px;
+            border-bottom: 2px solid #f1f5f9;
+        }}
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }}
+        th {{
+            background: #f8fafc;
+            padding: 10px 12px;
+            text-align: left;
+            font-weight: 600;
+            color: #475569;
+            border-bottom: 2px solid #e2e8f0;
+        }}
+        td {{
+            padding: 10px 12px;
+            border-bottom: 1px solid #f1f5f9;
+            color: #334155;
+        }}
+        tr:hover {{ background: #f8fafc; }}
+        .income-amount {{ color: #10b981; font-weight: 600; }}
+        .expense-amount {{ color: #ef4444; font-weight: 600; }}
+        .usdt-amount {{ color: #6366f1; font-weight: 500; }}
+        .table-responsive {{ overflow-x: auto; -webkit-overflow-scrolling: touch; }}
+        .footer {{
+            text-align: center;
+            padding: 24px;
+            color: rgba(255,255,255,0.8);
+            font-size: 12px;
+        }}
+        @media (max-width: 640px) {{
+            .header h1 {{ font-size: 20px; }}
+            .summary-card .value {{ font-size: 18px; }}
+            th, td {{ padding: 8px 6px; font-size: 11px; }}
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📋 {title}</h1>
+            <div class="time">生成时间：{now}</div>
+        </div>
+
+        <div class="config-bar">
+            <div class="config-item">
+                <div class="config-label">💰 手续费率</div>
+                <div class="config-value">{fee_rate}%</div>
+            </div>
+            <div class="config-item">
+                <div class="config-label">💱 汇率</div>
+                <div class="config-value">1 USDT = {exchange_rate} 元</div>
+            </div>
+            <div class="config-item">
+                <div class="config-label">📝 单笔费用</div>
+                <div class="config-value">{per_transaction_fee} 元</div>
+            </div>
+        </div>
+
+        <div class="summary-grid">
+            <div class="summary-card income">
+                <div class="icon">💰</div>
+                <div class="label">总入款</div>
+                <div class="value">{fmt(total_income_cny)} 元</div>
+                <div style="font-size:14px;color:#666;">≈ {fmt(total_income_usdt)} USDT</div>
+            </div>
+            <div class="summary-card expense">
+                <div class="icon">📤</div>
+                <div class="label">总出款</div>
+                <div class="value">{fmt(total_expense_usdt)} USDT</div>
+            </div>
+            <div class="summary-card pending">
+                <div class="icon">⏳</div>
+                <div class="label">待下发</div>
+                <div class="value">{fmt(pending_usdt)} USDT</div>
+            </div>
+        </div>
+
+        {category_section}
+
+        <div class="card">
+            <h2>📈 入款记录（{len(income_records)}笔）</h2>
+            <div class="table-responsive">
+                <table>
+                    <thead>
+                        <tr><th>日期时间</th><th>金额(元)</th><th>费率/汇率</th><th>到账(USDT)</th><th>分类</th><th>操作人</th></tr>
+                    </thead>
+                    <tbody>{income_rows if income_rows else '<tr><td colspan="6" style="text-align:center;color:#999;">暂无入款记录</td></tr>'}</tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>📉 出款记录（{len(expense_records)}笔）</h2>
+            <div class="table-responsive">
+                <table>
+                    <thead>
+                        <tr><th>日期时间</th><th>金额(USDT)</th><th>操作人</th></tr>
+                    </thead>
+                    <tbody>{expense_rows if expense_rows else '<tr><td colspan="3" style="text-align:center;color:#999;">暂无出款记录</td></tr>'}</tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="footer">
+            由 Telegram 记账机器人自动生成
+        </div>
+    </div>
+</body>
+</html>"""
+
+    return html
+
+
+async def handle_view_current_bill(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理「查看当前账单」按钮回调，生成 HTML 文件并发送"""
+    query = update.callback_query
+    await query.answer("正在生成账单...")
+
+    chat = query.message.chat
+    group_id = str(chat.id)
+    user_id = query.from_user.id
+    admin_id = get_user_admin_id(user_id)
+    am = get_accounting_manager(admin_id)
+
+    # 获取当前账单数据
+    stats = am.get_current_stats(group_id, admin_id=admin_id)
+    records = am.get_current_records(group_id, admin_id=admin_id)
+
+    if not records:
+        await query.answer("当前没有账单记录", show_alert=True)
+        return
+
+    # 发送临时提示消息
+    loading_msg = await query.message.reply_text("📊 正在生成美化账单，请稍候...")
+
+    try:
+        group_name = chat.title or chat.first_name or "当前群组"
+
+        # 生成 HTML
+        html_content = generate_beautiful_bill_html(stats, records, f"{group_name} - 当前账单")
+
+        import tempfile
+        import os
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.html', encoding='utf-8', delete=False) as f:
+            f.write(html_content)
+            temp_path = f.name
+
+        try:
+            with open(temp_path, 'rb') as f:
+                await query.message.reply_document(
+                    document=f,
+                    filename=f"账单_{group_name}_当前.html",
+                    caption=f"📊 **{group_name}** 当前账单\n\n"
+                            f"💰 总入款：{stats['income_total']:.2f} 元 ≈ {stats['income_usdt']:.2f} USDT\n"
+                            f"📤 总出款：{stats['expense_usdt']:.2f} USDT\n"
+                            f"⏳ 待下发：{stats['pending_usdt']:.2f} USDT\n"
+                            f"📝 共 {stats['income_count'] + stats['expense_count']} 条记录",
+                    parse_mode='Markdown'
+                )
+        finally:
+            try:
+                os.unlink(temp_path)
+            except:
+                pass
+
+        await loading_msg.delete()
+
+    except Exception as e:
+        logger.error(f"生成账单HTML失败: {e}")
+        await loading_msg.edit_text(f"❌ 生成失败：{str(e)[:100]}")
+
 def get_conversation_handler():
     conv_handler = ConversationHandler(
         entry_points=[
@@ -3327,8 +3695,6 @@ async def handle_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`+1000 德国` 带分类\n"
         "`+1000/7.2` 临时汇率\n"
         "`+1000*5` 临时费率\n"
-        "`+1000#2` 临时单笔费用\n"              # 🔥 新增
-        "`+1000*5/7.2#2 德国` 完整格式\n"       # 🔥 新增
         "`+1000*5/7.2 德国` 临时费率+汇率+分类\n"
         "`-500` 修正入款\n\n"
         "💸 **出款操作**\n"
@@ -3491,33 +3857,8 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             content = text[1:].strip()
             temp_rate = None
             temp_fee = None
-            temp_per_fee = None  # 🔥 新增
             category = ""
             amount_str = content
-
-            # 🔥 先检查是否包含 # 号（临时单笔费用）
-            if '#' in content:
-                hash_index = content.index('#')
-                before_hash = content[:hash_index]
-                after_hash = content[hash_index + 1:]
-
-                per_fee_match = re.match(r'^(\d+(?:\.\d+)?)', after_hash)
-                if per_fee_match:
-                    temp_per_fee = float(per_fee_match.group(1))
-                    remaining = after_hash[per_fee_match.end():].strip()
-                    if remaining and not category:
-                        category = remaining
-                else:
-                    await message.reply_text("❌ 单笔费用格式错误：#数字 或 #数字 备注")
-                    return
-
-                content = before_hash.strip()
-                if not content:
-                    await message.reply_text("❌ # 前面需要输入金额")
-                    return
-                amount_str = content
-                
-            # 检查是否包含 * 号（临时手续费）
             if '*' in content:
                 star_parts = content.split('*', 1)
                 amount_str = star_parts[0].strip()
@@ -3534,7 +3875,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                         temp_rate = float(rate_part_clean)
                     except ValueError:
                         temp_rate = None
-                    if ' ' in rate_part and not category:
+                    if ' ' in rate_part:
                         category = rate_part.split(' ', 1)[1].strip()
                 else:
                     fee_part = rest.split(' ', 1)[0].strip()
@@ -3543,31 +3884,27 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                         temp_fee = float(temp_fee_str)
                     except ValueError:
                         temp_fee = None
-                    if ' ' in rest and not category:
+                    if ' ' in rest:
                         category = rest.split(' ', 1)[1].strip()
             elif '/' in content:
                 parts = content.split('/', 1)
                 amount_str = parts[0].strip()
                 rest = parts[1].strip()
                 if ' ' in rest:
-                    rate_part, cat = rest.split(' ', 1)
+                    rate_part, category = rest.split(' ', 1)
                     try:
                         temp_rate = float(rate_part)
-                        if not category:
-                            category = cat
                     except ValueError:
-                        if not category:
-                            category = rest
+                        category = rest
                         temp_rate = None
                 else:
                     try:
                         temp_rate = float(rest)
                     except ValueError:
-                        if not category:
-                            category = rest
+                        category = rest
                         temp_rate = None
             else:
-                if ' ' in amount_str and not category:
+                if ' ' in amount_str:
                     parts = amount_str.split(' ', 1)
                     amount_str = parts[0]
                     category = parts[1]
@@ -3575,7 +3912,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 amount = float(amount_str)
                 await handle_add_income(update, context, amount, is_correction=False,
                        category=category, temp_rate=temp_rate, temp_fee=temp_fee,
-                       temp_per_fee=temp_per_fee, admin_id=admin_id)  # 🔥 传递 temp_per_fee
+                       admin_id=admin_id)
             else:
                 await message.reply_text("❌ 格式错误：+金额 或 +金额*手续费% 或 +金额/汇率 或 +金额*手续费%/汇率 或 +金额 备注")
         except ValueError:
@@ -3589,32 +3926,8 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             content = text[1:].strip()
             temp_rate = None
             temp_fee = None
-            temp_per_fee = None  # 🔥 新增
             category = ""
             amount_str = content
-            # 🔥 先检查是否包含 # 号（临时单笔费用）
-            if '#' in content:
-                hash_index = content.index('#')
-                before_hash = content[:hash_index]
-                after_hash = content[hash_index + 1:]
-
-                per_fee_match = re.match(r'^(\d+(?:\.\d+)?)', after_hash)
-                if per_fee_match:
-                    temp_per_fee = float(per_fee_match.group(1))
-                    remaining = after_hash[per_fee_match.end():].strip()
-                    if remaining and not category:
-                        category = remaining
-                else:
-                    await message.reply_text("❌ 单笔费用格式错误：#数字 或 #数字 备注")
-                    return
-
-                content = before_hash.strip()
-                if not content:
-                    await message.reply_text("❌ # 前面需要输入金额")
-                    return
-                amount_str = content
-                
-            # 检查是否包含 * 号（临时手续费）
             if '*' in content:
                 star_parts = content.split('*', 1)
                 amount_str = star_parts[0].strip()
@@ -3631,7 +3944,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                         temp_rate = float(rate_part_clean)
                     except ValueError:
                         temp_rate = None
-                    if ' ' in rate_part and not category:
+                    if ' ' in rate_part:
                         category = rate_part.split(' ', 1)[1].strip()
                 else:
                     fee_part = rest.split(' ', 1)[0].strip()
@@ -3640,31 +3953,27 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                         temp_fee = float(temp_fee_str)
                     except ValueError:
                         temp_fee = None
-                    if ' ' in rest and not category:
+                    if ' ' in rest:
                         category = rest.split(' ', 1)[1].strip()
             elif '/' in content:
                 parts = content.split('/', 1)
                 amount_str = parts[0].strip()
                 rest = parts[1].strip()
                 if ' ' in rest:
-                    rate_part, cat = rest.split(' ', 1)  # ✅ 用 cat
+                    rate_part, category = rest.split(' ', 1)
                     try:
                         temp_rate = float(rate_part)
-                        if not category:
-                            category = cat  # ✅ 这里的 cat 在上面定义了
                     except ValueError:
-                        if not category:
-                            category = rest
+                        category = rest
                         temp_rate = None
                 else:
                     try:
                         temp_rate = float(rest)
                     except ValueError:
-                        if not category:
-                            category = rest
+                        category = rest
                         temp_rate = None
             else:
-                if ' ' in amount_str and not category:
+                if ' ' in amount_str:
                     parts = amount_str.split(' ', 1)
                     amount_str = parts[0]
                     category = parts[1]
@@ -3672,7 +3981,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 amount = float(amount_str)
                 await handle_add_income(update, context, amount, is_correction=True,
                        category=category, temp_rate=temp_rate, temp_fee=temp_fee,
-                       temp_per_fee=temp_per_fee, admin_id=admin_id)  # 🔥 传递 temp_per_fee
+                       admin_id=admin_id)
             else:
                 await message.reply_text("❌ 格式错误：-金额 或 -金额*手续费% 或 -金额/汇率 或 -金额*手续费%/汇率 或 -金额 备注")
         except ValueError:
