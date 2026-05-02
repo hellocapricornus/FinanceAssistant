@@ -119,7 +119,7 @@ def get_input_cancel_keyboard():
 # ==================== 已知按钮文本集合 ====================
 ALL_KNOWN_BUTTONS = {
     # 主菜单
-    "📒 记账", "🔔 USDT监控", "📢 群发", "💰 USDT查询",
+    "📒 记账", "🔔 USDT监控", "📢 群发", "💰 USDT查询","➕ 添加我进群",
     "👤 操作人管理", "🔄 互转查询", "📁 群组管理",
     # 监控
     "➕ 添加监控地址", "📋 监控列表", "📊 月度统计", "❌ 删除监控地址",
@@ -171,6 +171,13 @@ async def keyboard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ 记账功能仅限管理员/操作员/临时操作员才能使用\n\n如需使用，请联系 @ChinaEdward 申请权限", reply_markup=get_main_menu(user_id))
             return
         await accounting.handle_keyboard(update, context)
+        return
+    elif text == "➕ 添加我进群":
+        await update.message.reply_text(
+            "👆 [点击这里添加机器人到你的群组](https://t.me/CardKingBot?startgroup=start)",
+            parse_mode="Markdown",
+            disable_web_page_preview=True
+        )
         return
     elif text == "🔔 USDT监控":
         if not is_authorized(user_id, require_full_access=True):
