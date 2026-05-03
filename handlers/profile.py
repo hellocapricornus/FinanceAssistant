@@ -590,7 +590,10 @@ def _build_beautiful_html(user_id, role, identity_color, accounting_tabs, chart_
     def safe_serialize(obj):
         if hasattr(obj, 'isoformat'):
             return obj.isoformat()
-        return str(obj)
+        result = str(obj)
+        # ✅ 转义危险的 HTML 序列
+        result = result.replace('</', '<\\/')
+        return result
     acc_json = _json.dumps(accounting_tabs, default=safe_serialize)
     addr_json = _json.dumps(address_tabs, default=safe_serialize)
     grp_json = _json.dumps(groups_data, default=safe_serialize)
