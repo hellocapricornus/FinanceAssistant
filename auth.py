@@ -20,15 +20,14 @@ def load_admins_from_db():
     global admins
     try:
         with get_db(0) as conn:
-            # ✅ 确保列存在
             try:
                 conn.execute("ALTER TABLE admins ADD COLUMN expire_date INTEGER DEFAULT 0")
             except:
-                pass  # 列已存在
+                pass
             try:
                 conn.execute("ALTER TABLE admins ADD COLUMN source TEXT DEFAULT 'manual'")
             except:
-                pass  # 列已存在
+                pass
             c = conn.cursor()
             c.execute("SELECT admin_id, added_by, created_at, deleted_at, expire_date, source FROM admins WHERE deleted_at=0")
             rows = c.fetchall()
@@ -122,7 +121,6 @@ def init_auth():
     load_admins_from_db()
     init_operators_from_db()
     init_temp_operators_from_db()
-    # 确保超级管理员在管理员列表中
     if OWNER_ID not in admins:
         add_admin(OWNER_ID)
 
@@ -151,6 +149,7 @@ def is_authorized(user_id: int, require_full_access: bool = False) -> bool:
         return user_id in operators
     return user_id in operators or user_id in temp_operators
 
+
 def get_user_admin_id(user_id: int) -> int:
     if user_id == OWNER_ID:
         return OWNER_ID
@@ -168,14 +167,14 @@ def get_user_preferences(user_id: int) -> dict:
     if user_id == OWNER_ID:
         admin_id = OWNER_ID
     else:
+        # ✅ 先初始化为 0
+        admin_id = 0
         if user_id in admins:
             admin_id = user_id
-        elif user_id in operators:
+        elif user_id in operators:                              # ✅ 修复：变量名改回 operators
             admin_id = operators[user_id].get("added_by", 0)
-        elif user_id in temp_operators:
+        elif user_id in temp_operators:                         # ✅ 修复：变量名改回 temp_operators
             admin_id = temp_operators[user_id].get("added_by", 0)
-        else:
-            admin_id = 0
     return db_get_prefs(user_id, admin_id)
 
 
@@ -199,14 +198,21 @@ def add_admin(admin_id: int) -> bool:
         return False
     now = int(time.time())
     try:
-        with get_db(0) as conn:
-            c = conn.cursor()
-            c.execute("INSERT OR REPLACE INTO admins (admin_id, added_by, created_at) VALUES (?, ?, ?)",
-                      (admin_id, OWNER_ID, now))
-        admins[admin_id] = {"id": admin_id, "added_by": OWNER_ID, "created_at": now}
         from db_manager import init_admin_db
         init_admin_db(admin_id)
+
+        # ✅ 先插入主库记录
+        with get_db(0) as conn:
+            c = conn.cursor()
+            c.execute(
+                "INSERT OR REPLACE INTO admins (admin_id, added_by, created_at) VALUES (?, ?, ?)",
+                (admin_id, OWNER_ID, now)
+            )
+
+        # ✅ 再设置用户偏好
         set_user_preference(admin_id, "role", "admin")
+
+        admins[admin_id] = {"id": admin_id, "added_by": OWNER_ID, "created_at": now}
         print(f"✅ 已添加管理员 {admin_id}")
         return True
     except Exception as e:
@@ -225,7 +231,8 @@ def remove_admin(admin_id: int) -> bool:
             c.execute("DELETE FROM operators WHERE added_by = ?", (admin_id,))
             c.execute("DELETE FROM temp_operators WHERE added_by = ?", (admin_id,))
 
-        admins.pop(admin_id, None)
+        # ✅ 标记为删除，而不是从内存中移除
+        admins[admin_id]["deleted_at"] = now
 
         to_remove = [uid for uid, info in operators.items() if info.get("added_by") == admin_id]
         for uid in to_remove:
