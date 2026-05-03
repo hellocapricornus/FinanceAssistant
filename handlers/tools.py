@@ -2,7 +2,7 @@
 
 import re
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 from handlers.data_provider import beijing_now
@@ -27,7 +27,6 @@ from handlers.transfer import get_trc20_transfers, get_trc20_transfers_paginated
 # 记账模块相关
 from handlers.accounting import get_accounting_manager
 
-from handlers.data_provider import run_async
 
 # ========== 工具定义（保持不变） ==========
 TOOLS = [
@@ -328,40 +327,67 @@ TOOLS = [
 ]
 
 # ========== 辅助函数 ==========
-# ✅ 新增：admin_id 校验函数
+
 def _validate_admin_id(admin_id: int) -> int:
     """校验 admin_id，返回有效的 admin_id 或抛出异常"""
     if admin_id is None or admin_id <= 0:
         raise ValueError(f"Invalid admin_id: {admin_id}")
     return admin_id
-    
-def _get_date_range(period: str) -> Tuple[int, int]:
-    """获取时间范围的时间戳（毫秒）"""
+
+
+def _get_date_range_sec(period: str) -> Tuple[int, int]:
+    """
+    获取时间范围的时间戳（秒）- 用于数据库查询
+    accounting_records.created_at 是秒级时间戳
+    """
     now = beijing_now()
     if period == "today":
-        start = int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
-        end = int(now.timestamp() * 1000)
+        start = int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+        end = int(now.timestamp())
     elif period == "week":
-        start = int((now - timedelta(days=7)).timestamp() * 1000)
-        end = int(now.timestamp() * 1000)
+        start = int((now - timedelta(days=7)).timestamp())
+        end = int(now.timestamp())
     elif period == "month":
-        start = int((now - timedelta(days=30)).timestamp() * 1000)
-        end = int(now.timestamp() * 1000)
+        start = int((now - timedelta(days=30)).timestamp())
+        end = int(now.timestamp())
     elif period == "total":
         start = 0
-        end = int(now.timestamp() * 1000)
+        end = int(now.timestamp())
     else:
         start = 0
-        end = int(now.timestamp() * 1000)
+        end = int(now.timestamp())
     return start, end
 
+
+def _get_date_range_ms(period: str) -> Tuple[int, int]:
+    """
+    获取时间范围的时间戳（毫秒）- 用于链上 API 查询
+    get_trc20_transactions 的 min_timestamp 参数是毫秒级
+    """
+    start_sec, end_sec = _get_date_range_sec(period)
+    return start_sec * 1000, end_sec * 1000
+
+
+def _get_date_range(period: str) -> Tuple[int, int]:
+    """
+    获取时间范围的时间戳（秒）
+    保留旧名称以兼容现有调用
+    """
+    return _get_date_range_sec(period)
+
+
 def _filter_records_by_date(records: List[Dict], start_ts: int, end_ts: int) -> List[Dict]:
+    """
+    根据时间戳过滤记录
+    start_ts 和 end_ts 是秒级时间戳，与 accounting_records.created_at 一致
+    """
     result = []
     for r in records:
         created_at = r.get('created_at', 0)
         if start_ts <= created_at <= end_ts:
             result.append(r)
     return result
+
 
 def _get_period_name(period: str) -> str:
     names = {
@@ -372,6 +398,7 @@ def _get_period_name(period: str) -> str:
     }
     return names.get(period, "今日")
 
+
 async def _get_stats_by_period(admin_id: int, group_id: str, period: str) -> Dict:
     am = get_accounting_manager(admin_id)
     if period == "today":
@@ -381,7 +408,7 @@ async def _get_stats_by_period(admin_id: int, group_id: str, period: str) -> Dic
     else:
         stats = am.get_total_stats(group_id, admin_id=admin_id)
         records = am.get_total_records(group_id, admin_id=admin_id)
-        start_ts, end_ts = _get_date_range(period)
+        start_ts, end_ts = _get_date_range_sec(period)  # ✅ 使用秒级时间戳
         filtered = _filter_records_by_date(records, start_ts, end_ts)
         income_total = sum(r['amount'] for r in filtered if r['type'] == 'income')
         income_usdt = sum(r['amount_usdt'] for r in filtered if r['type'] == 'income')
@@ -404,7 +431,6 @@ async def _get_stats_by_period(admin_id: int, group_id: str, period: str) -> Dic
 
 async def get_today_stats(admin_id: int, group_id: str) -> str:
     admin_id = _validate_admin_id(admin_id)
-    am = get_accounting_manager(admin_id)
     stats = await _get_stats_by_period(admin_id, group_id, "today")
     if stats['income_count'] == 0 and stats['expense_count'] == 0:
         return "今日暂无记账记录"
@@ -417,7 +443,6 @@ async def get_today_stats(admin_id: int, group_id: str) -> str:
 
 async def get_week_stats(admin_id: int, group_id: str) -> str:
     admin_id = _validate_admin_id(admin_id)
-    am = get_accounting_manager(admin_id)
     stats = await _get_stats_by_period(admin_id, group_id, "week")
     if stats['income_count'] == 0 and stats['expense_count'] == 0:
         return "本周暂无记账记录"
@@ -430,7 +455,6 @@ async def get_week_stats(admin_id: int, group_id: str) -> str:
 
 async def get_month_stats(admin_id: int, group_id: str) -> str:
     admin_id = _validate_admin_id(admin_id)
-    am = get_accounting_manager(admin_id)
     stats = await _get_stats_by_period(admin_id, group_id, "month")
     if stats['income_count'] == 0 and stats['expense_count'] == 0:
         return "本月暂无记账记录"
@@ -443,7 +467,6 @@ async def get_month_stats(admin_id: int, group_id: str) -> str:
 
 async def get_total_stats(admin_id: int, group_id: str) -> str:
     admin_id = _validate_admin_id(admin_id)
-    am = get_accounting_manager(admin_id)
     stats = await _get_stats_by_period(admin_id, group_id, "total")
     if stats['income_count'] == 0 and stats['expense_count'] == 0:
         return "暂无记账记录"
@@ -492,26 +515,26 @@ async def get_top_users(admin_id: int, group_id: str, limit: int = 5, period: st
     am = get_accounting_manager(admin_id)
     records = am.get_total_records(group_id, admin_id=admin_id)
     if period != "total":
-        start_ts, end_ts = _get_date_range(period)
+        start_ts, end_ts = _get_date_range_sec(period)  # ✅ 使用秒级时间戳
         records = _filter_records_by_date(records, start_ts, end_ts)
     user_income = defaultdict(float)
     user_count = defaultdict(int)
     user_name_map = {}
     for r in records:
         if r['type'] == 'income':
-            user_id = r.get('user_id')
-            display_name = r.get('display_name', str(user_id))
-            user_name_map[user_id] = display_name
-            user_income[user_id] += r['amount']
-            user_count[user_id] += 1
+            uid = r.get('user_id')
+            display_name = r.get('display_name', str(uid))
+            user_name_map[uid] = display_name
+            user_income[uid] += r['amount']
+            user_count[uid] += 1
     if not user_income:
         return f"{_get_period_name(period)}暂无入款记录"
     sorted_users = sorted(user_income.items(), key=lambda x: x[1], reverse=True)[:limit]
     period_name = _get_period_name(period)
     result = f"🏆 {period_name}入款排行 TOP{limit}：\n"
-    for i, (user_id, amount) in enumerate(sorted_users, 1):
-        name = user_name_map.get(user_id, str(user_id))
-        count = user_count[user_id]
+    for i, (uid, amount) in enumerate(sorted_users, 1):
+        name = user_name_map.get(uid, str(uid))
+        count = user_count[uid]
         result += f"{i}. {name}：{amount:.2f} 元（{count}笔）\n"
     return result
 
@@ -520,15 +543,13 @@ async def get_category_percentage(admin_id: int, group_id: str, period: str = "t
     am = get_accounting_manager(admin_id)
     records = am.get_total_records(group_id, admin_id=admin_id)
     if period != "total":
-        start_ts, end_ts = _get_date_range(period)
+        start_ts, end_ts = _get_date_range_sec(period)  # ✅ 使用秒级时间戳
         records = _filter_records_by_date(records, start_ts, end_ts)
     category_amount = defaultdict(float)
     total = 0
     for r in records:
         if r['type'] == 'income':
-            category = r.get('category', '未分类')
-            if not category:
-                category = '未分类'
+            category = r.get('category', '') or '未分类'
             category_amount[category] += r['amount']
             total += r['amount']
     if total == 0:
@@ -571,7 +592,7 @@ async def get_hourly_distribution(admin_id: int, group_id: str, period: str = "t
     am = get_accounting_manager(admin_id)
     records = am.get_total_records(group_id, admin_id=admin_id)
     if period != "total":
-        start_ts, end_ts = _get_date_range(period)
+        start_ts, end_ts = _get_date_range_sec(period)  # ✅ 使用秒级时间戳
         records = _filter_records_by_date(records, start_ts, end_ts)
     hourly_amount = [0] * 24
     hourly_count = [0] * 24
@@ -594,13 +615,11 @@ async def get_hourly_distribution(admin_id: int, group_id: str, period: str = "t
 
 async def get_pending_usdt(admin_id: int, group_id: str) -> str:
     admin_id = _validate_admin_id(admin_id)
-    am = get_accounting_manager(admin_id)
     stats = await _get_stats_by_period(admin_id, group_id, "today")
     return f"⏳ 当前待下发：{stats['pending_usdt']:.2f} USDT"
 
 async def get_average_order(admin_id: int, group_id: str, period: str = "today") -> str:
     admin_id = _validate_admin_id(admin_id)
-    am = get_accounting_manager(admin_id)
     stats = await _get_stats_by_period(admin_id, group_id, period)
     if stats['income_count'] == 0:
         return f"{_get_period_name(period)}暂无入款记录"
@@ -695,15 +714,13 @@ async def get_address_by_note(admin_id: int, note: str, user_id: int = None) -> 
 async def get_address_stats(admin_id: int, address: str, period: str = "today", user_id: int = None) -> str:
     admin_id = _validate_admin_id(admin_id)
     from handlers.monitor import get_trc20_transactions
-    start_ts, _ = _get_date_range(period)
+    start_ts, _ = _get_date_range_ms(period)  # ✅ 使用毫秒级时间戳（链上 API）
     period_name = _get_period_name(period)
-    # 检查权限：该地址是否属于当前用户（在独立库中且 added_by == user_id 或 added_by 属于当前管理员）
     addresses = db_get_monitored_addresses(admin_id=admin_id, user_id=user_id)
     addr_info = next((a for a in addresses if a['address'] == address), None)
     if not addr_info:
         return f"❌ 您没有权限查询地址 {address[:8]}..."
     note = addr_info.get('note', '')
-    # 分页获取所有交易记录
     all_txs = []
     page = 0
     limit = 200
@@ -751,7 +768,7 @@ async def get_address_balance(admin_id: int, address: str, user_id: int = None) 
 async def get_top_transactions(admin_id: int, address: str = None, limit: int = 5, period: str = "today", user_id: int = None) -> str:
     admin_id = _validate_admin_id(admin_id)
     from handlers.monitor import get_trc20_transactions
-    start_ts, _ = _get_date_range(period)
+    start_ts, _ = _get_date_range_ms(period)  # ✅ 使用毫秒级时间戳（链上 API）
     period_name = _get_period_name(period)
     if address:
         addresses = db_get_monitored_addresses(admin_id=admin_id, user_id=user_id)
