@@ -287,18 +287,18 @@ class DataProvider:
         groups = self._get_visible_groups(admin_id, user_id)
         try:
             if '-' in date_str:
-                target_date = datetime.strptime(date_str, '%Y-%m-%d')
+                target_date = datetime.strptime(date_str, '%Y-%m-%d').replace(tzinfo=BEIJING_TZ)  # ✅ 添加时区
             elif '年' in date_str:
                 match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', date_str)
                 if match:
                     year = int(match.group(1))
                     month = int(match.group(2))
                     day = int(match.group(3))
-                    target_date = datetime(year, month, day)
+                    target_date = datetime(year, month, day, tzinfo=BEIJING_TZ)
                 else:
                     return {"error": f"日期格式错误: {date_str}"}
             else:
-                target_date = datetime.strptime(date_str, '%Y-%m-%d')
+                target_date = datetime.strptime(date_str, '%Y-%m-%d').replace(tzinfo=BEIJING_TZ)
             day_start = target_date.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
             day_end = (target_date + timedelta(days=1)).timestamp()
         except Exception as e:
