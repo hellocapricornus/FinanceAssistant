@@ -391,7 +391,7 @@ class AIClient:
         if any(kw in prompt_lower for kw in category_keywords):
             # 从数据库动态获取分类名称
             from db import get_all_categories
-            categories = get_all_categories()
+            categories = get_all_categories(admin_id=admin_id)
             category_names = [cat['name'] for cat in categories]
 
             for cat in category_names:
@@ -705,7 +705,7 @@ class AIClient:
         from db import get_all_categories
 
         # 获取所有已保存的分类名称
-        categories = get_all_categories()
+        categories = get_all_categories(admin_id=admin_id)
         category_names = [cat['name'] for cat in categories]
 
         # 按长度排序，优先匹配更长的分类名（避免短词误匹配）
