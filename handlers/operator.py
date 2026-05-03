@@ -6,7 +6,8 @@ from auth import (
     add_operator, remove_operator, get_operators_list_text, 
     cmd_update_operator_info, update_all_operators_info,
     add_temp_operator, remove_temp_operator, get_temp_operators_list_text,
-    is_authorized, get_user_admin_id, add_admin, remove_admin, admins, is_admin
+    is_authorized, get_user_admin_id, add_admin, remove_admin, admins, is_admin,
+operators, temp_operators
 )
 from config import OWNER_ID
 from handlers.accounting import BEIJING_TZ
