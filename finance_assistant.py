@@ -719,7 +719,8 @@ async def show_transfer_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text("💱 **互转查询功能**\n请选择操作：", reply_markup=get_transfer_keyboard(), parse_mode="Markdown")
 
 async def show_group_manager_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    admin_id = get_user_admin_id(update.effective_user.id)
+    user_id = update.effective_user.id  # ✅ 先定义
+    admin_id = get_user_admin_id(user_id)
     if admin_id == 0 and user_id != OWNER_ID:
         await update.message.reply_text("❌ 您不是任何管理员，无法使用此功能")
         return
@@ -731,7 +732,8 @@ async def show_group_manager_menu(update: Update, context: ContextTypes.DEFAULT_
     await update.message.reply_text(text, reply_markup=get_group_manager_keyboard(), parse_mode="Markdown")
 
 async def start_usdt_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    admin_id = get_user_admin_id(update.effective_user.id)
+    user_id = update.effective_user.id  # ✅ 先定义
+    admin_id = get_user_admin_id(user_id)
     if admin_id == 0 and user_id != OWNER_ID:
         await update.message.reply_text("❌ 您不是任何管理员，无法使用此功能")
         return
@@ -1197,10 +1199,6 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from handlers.accounting import handle_export_month_selection
         await handle_export_month_selection(update, context)
         return
-    if data == "export_cancel":
-        await query.message.edit_text("✅ 已取消导出")
-        return
-
     if data == "export_cancel":
         await query.message.edit_text("✅ 已取消导出")
         return
