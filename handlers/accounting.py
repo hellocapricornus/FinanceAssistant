@@ -11,7 +11,7 @@ from typing import Dict, List, Tuple, Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler, CallbackQueryHandler
-from auth import is_authorized, get_user_admin_id
+from auth import is_authorized, get_user_admin_id, add_temp_operator, remove_temp_operator
 from config import OWNER_ID
 
 # 导入新的连接管理器
@@ -810,6 +810,18 @@ class AccountingManager:
                 last_seen INTEGER NOT NULL,
                 PRIMARY KEY (group_id, user_id)
             );
+            
+            -- ✅ 新增：用户个性化配置表
+            CREATE TABLE IF NOT EXISTS user_config (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                fee_rate REAL,
+                exchange_rate REAL,
+                per_transaction_fee REAL,
+                updated_at INTEGER DEFAULT 0,
+                UNIQUE(group_id, user_id)
+            );
 
             CREATE INDEX IF NOT EXISTS idx_records_group_id ON accounting_records(group_id);
             CREATE INDEX IF NOT EXISTS idx_records_session_id ON accounting_records(session_id);
@@ -1421,6 +1433,139 @@ class AccountingManager:
             logger.error(f"设置单笔费用失败: {e}")
             return False
 
+    # ========== 用户个性化配置管理 ==========
+
+    def set_user_config(self, group_id: str, user_id: int, fee_rate: float = None, 
+                        exchange_rate: float = None, per_transaction_fee: float = None, 
+                        admin_id: int = 0) -> bool:
+        """设置用户在指定群组的个性化配置"""
+        try:
+            with self._get_conn(admin_id) as conn:
+                c = conn.cursor()
+                now = int(time.time())
+
+                # 先检查是否已有配置
+                c.execute(
+                    "SELECT id FROM user_config WHERE group_id = ? AND user_id = ?",
+                    (group_id, user_id)
+                )
+                existing = c.fetchone()
+
+                if existing:
+                    # 更新现有配置
+                    updates = []
+                    params = []
+                    if fee_rate is not None:
+                        updates.append("fee_rate = ?")
+                        params.append(fee_rate)
+                    if exchange_rate is not None:
+                        updates.append("exchange_rate = ?")
+                        params.append(exchange_rate)
+                    if per_transaction_fee is not None:
+                        updates.append("per_transaction_fee = ?")
+                        params.append(per_transaction_fee)
+
+                    if updates:
+                        updates.append("updated_at = ?")
+                        params.append(now)
+                        params.extend([group_id, user_id])
+                        c.execute(
+                            f"UPDATE user_config SET {', '.join(updates)} WHERE group_id = ? AND user_id = ?",
+                            params
+                        )
+                else:
+                    # 插入新配置
+                    c.execute("""
+                        INSERT INTO user_config (group_id, user_id, fee_rate, exchange_rate, per_transaction_fee, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, (group_id, user_id, fee_rate, exchange_rate, per_transaction_fee, now))
+
+                conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"设置用户配置失败: {e}")
+            return False
+
+    def get_user_config(self, group_id: str, user_id: int, admin_id: int = 0) -> dict:
+        """获取用户在指定群组的个性化配置"""
+        try:
+            with self._get_conn(admin_id) as conn:
+                c = conn.cursor()
+                c.execute(
+                    "SELECT fee_rate, exchange_rate, per_transaction_fee FROM user_config WHERE group_id = ? AND user_id = ?",
+                    (group_id, user_id)
+                )
+                row = c.fetchone()
+                if row:
+                    return {
+                        "fee_rate": row[0],
+                        "exchange_rate": row[1],
+                        "per_transaction_fee": row[2],
+                        "has_config": True
+                    }
+                return {"has_config": False}
+        except Exception as e:
+            logger.error(f"获取用户配置失败: {e}")
+            return {"has_config": False}
+
+    def delete_user_config(self, group_id: str, user_id: int, admin_id: int = 0) -> bool:
+        """删除用户在指定群组的个性化配置"""
+        try:
+            with self._get_conn(admin_id) as conn:
+                c = conn.cursor()
+                c.execute(
+                    "DELETE FROM user_config WHERE group_id = ? AND user_id = ?",
+                    (group_id, user_id)
+                )
+                conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"删除用户配置失败: {e}")
+            return False
+
+    def get_all_user_configs(self, group_id: str, admin_id: int = 0) -> list:
+        """获取群组中所有用户的个性化配置"""
+        try:
+            with self._get_conn(admin_id) as conn:
+                c = conn.cursor()
+                c.execute("""
+                    SELECT uc.user_id, uc.fee_rate, uc.exchange_rate, uc.per_transaction_fee, 
+                           gu.first_name, gu.username
+                    FROM user_config uc
+                    LEFT JOIN group_users gu ON uc.group_id = gu.group_id AND uc.user_id = gu.user_id
+                    WHERE uc.group_id = ?
+                    ORDER BY uc.updated_at DESC
+                """, (group_id,))
+                rows = c.fetchall()
+                return [dict(r) for r in rows]
+        except Exception as e:
+            logger.error(f"获取所有用户配置失败: {e}")
+            return []
+
+    def get_effective_config(self, group_id: str, user_id: int, admin_id: int = 0) -> dict:
+        """
+        获取用户的有效配置（优先使用个性化配置，否则使用群组默认配置）
+        """
+        session = self.get_or_create_session(group_id, admin_id)
+
+        # 先获取用户个性化配置
+        user_config = self.get_user_config(group_id, user_id, admin_id)
+
+        if user_config.get("has_config"):
+            return {
+                "fee_rate": user_config["fee_rate"] if user_config["fee_rate"] is not None else session["fee_rate"],
+                "exchange_rate": user_config["exchange_rate"] if user_config["exchange_rate"] is not None else session["exchange_rate"],
+                "per_transaction_fee": user_config["per_transaction_fee"] if user_config["per_transaction_fee"] is not None else session.get("per_transaction_fee", 0),
+                "is_personalized": True
+            }
+
+        return {
+            "fee_rate": session["fee_rate"],
+            "exchange_rate": session["exchange_rate"],
+            "per_transaction_fee": session.get("per_transaction_fee", 0),
+            "is_personalized": False
+        }
+
     # ========== 清理和撤销 ==========
     def clear_current_session(self, group_id: str, admin_id: int) -> bool:
         try:
@@ -1939,30 +2084,57 @@ async def handle_add_income(update: Update, context: ContextTypes.DEFAULT_TYPE,
     message_id = update.message.message_id
     cur_admin_id = get_user_admin_id(user.id)
     am = get_accounting_manager(cur_admin_id)
+
+    # ✅ 获取有效配置（优先使用个性化配置）
+    effective_config = am.get_effective_config(group_id, user.id, cur_admin_id)
+
+    # 如果用户有临时设置的参数，优先使用临时参数
+    actual_fee_rate = temp_fee if temp_fee is not None else effective_config["fee_rate"]
+    actual_exchange_rate = temp_rate if temp_rate is not None else effective_config["exchange_rate"]
+    actual_per_fee = effective_config["per_transaction_fee"]
+
+    # 使用有效配置计算
+    session = am.get_or_create_session(group_id, cur_admin_id)
+    if session['exchange_rate'] > 0:
+        after_fee = amount * (1 - actual_fee_rate / 100)
+        with_fee = after_fee + actual_per_fee
+        amount_usdt = with_fee / actual_exchange_rate
+    else:
+        amount_usdt = amount
+        
     success, _ = am.add_record(
         group_id, user.id, username, 'income', record_amount, desc,
-        category, temp_rate, message_id, temp_fee, cur_admin_id
+        category, actual_exchange_rate, message_id, actual_fee_rate, cur_admin_id
     )
+    
     if success:
         stats = am.get_current_stats(group_id, admin_id=cur_admin_id)
         records = am.get_current_records(group_id, admin_id=cur_admin_id)
-        message = format_bill_message(stats, records, "当前账单")
+        message_text = format_bill_message(stats, records, "当前账单")
+        
+        # ✅ 构建反馈信息
         prefix = f"✅ 已记录修正入款：-{abs(amount):.2f}" if is_correction else f"✅ 已记录入款：{amount:.2f}"
         if category:
             prefix += f" (分类：{category})"
-        temp_info = []
+
+        # 显示使用的配置信息
+        config_info = []
+        if effective_config.get("is_personalized"):
+            config_info.append("📌 使用个性化配置")
         if temp_fee is not None:
-            temp_info.append(f"临时手续费：{temp_fee}%")
+            config_info.append(f"临时手续费：{temp_fee}%")
         if temp_rate is not None:
-            temp_info.append(f"临时汇率：{temp_rate}")
-        if temp_info:
-            prefix += f" ({', '.join(temp_info)})"
-        # ✅ 添加内联按钮
+            config_info.append(f"临时汇率：{temp_rate}")
+        if config_info:
+            prefix += f"\n{' | '.join(config_info)}"
+
+        prefix += f"\n⚙️ 费率：{actual_fee_rate}% | 汇率：{actual_exchange_rate} | 单笔费用：{actual_per_fee}元"
+        
         view_button = InlineKeyboardButton("📊 查看当前账单", callback_data="view_current_bill")
         reply_markup = InlineKeyboardMarkup([[view_button]])
 
         await update.message.reply_text(
-            f"{prefix} \n\n{message}", 
+            f"{prefix} \n\n{message_text}", 
             parse_mode='Markdown',
             reply_markup=reply_markup
         )
@@ -3068,6 +3240,266 @@ async def generate_and_send_export(update: Update, context: ContextTypes.DEFAULT
     context.user_data.pop("export_days_page", None)
     context.user_data.pop("export_admin_id", None)
 
+async def handle_user_config_settings(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    """处理设置指定人的手续费/汇率/单笔费用"""
+    message = update.message
+    chat = update.effective_chat
+
+    if chat.type not in ['group', 'supergroup']:
+        await message.reply_text("❌ 此功能仅在群组中可用")
+        return
+
+    user_id = message.from_user.id
+    admin_id = get_user_admin_id(user_id)
+
+    if not is_authorized(user_id, require_full_access=False):
+        await message.reply_text("❌ 您没有权限进行此设置")
+        return
+
+    import re
+
+    # 获取目标用户
+    target_user = None
+    target_username = None
+
+    # 先检查是否是回复消息
+    if message.reply_to_message:
+        target_user = message.reply_to_message.from_user
+        display_name = target_user.first_name or target_user.username or str(target_user.id)
+        display_name = f"用户 {display_name}"
+    else:
+        # 从 @ 中提取用户
+        if message.entities:
+            for entity in message.entities:
+                if entity.type == "text_mention" and entity.user:
+                    target_user = entity.user
+                    break
+                elif entity.type == "mention":
+                    # 提取 @username
+                    target_username = text[entity.offset:entity.offset + entity.length].lstrip('@')
+                    break
+
+    # 如果只有 username，在数据库中查找对应的 user_id
+    if not target_user and target_username:
+        # 在 group_users 表中查找
+        group_id = str(chat.id)
+        am = get_accounting_manager(admin_id)
+
+        # 在当前管理员的 group_users 中查找
+        with am._get_conn(admin_id) as conn:
+            c = conn.cursor()
+            c.execute(
+                "SELECT user_id, first_name FROM group_users WHERE group_id = ? AND username = ? LIMIT 1",
+                (group_id, target_username)
+            )
+            row = c.fetchone()
+            if row:
+                target_user = type('User', (), {
+                    'id': row[0],
+                    'first_name': row[1] or target_username,
+                    'username': target_username
+                })()
+            else:
+                # 如果当前群组没找到，在其他群组中查找
+                c.execute(
+                    "SELECT user_id, first_name, username FROM group_users WHERE username = ? LIMIT 1",
+                    (target_username,)
+                )
+                row = c.fetchone()
+                if row:
+                    target_user = type('User', (), {
+                        'id': row[0],
+                        'first_name': row[1] or target_username,
+                        'username': target_username
+                    })()
+
+    if not target_user:
+        if target_username:
+            await message.reply_text(
+                f"❌ 未找到用户 @{target_username}\n\n"
+                "💡 请确认：\n"
+                "• 用户名是否正确\n"
+                "• 该用户是否在群组中发过言\n"
+                "• 或尝试回复该用户的消息来设置"
+            )
+        else:
+            await message.reply_text("❌ 请使用 @用户名 指定用户，或回复用户消息来设置")
+        return
+
+    # 使用 parse_batch_settings 解析设置参数
+    fee_rate, exchange_rate, per_transaction_fee = parse_batch_settings(text)
+
+    if fee_rate is None and exchange_rate is None and per_transaction_fee is None:
+        await message.reply_text(
+            "❌ 未识别到有效的设置参数\n\n"
+            "💡 用法示例：\n"
+            "• 设置 @用户名 手续费5\n"
+            "• 设置 @用户名 手续费5 汇率10\n"
+            "• 设置 @用户名 手续费5 汇率10 单笔费用12\n"
+            "• 回复用户消息：设置手续费5 汇率10",
+            parse_mode="Markdown"
+        )
+        return
+
+    group_id = str(chat.id)
+    am = get_accounting_manager(admin_id)
+
+    # 更新用户信息（记录到 group_users 表）
+    am.update_user_info(group_id, target_user.id, target_user.username or "", 
+                        target_user.first_name or "", "", admin_id)
+
+    # 执行设置
+    display_name = target_user.first_name or target_user.username or str(target_user.id)
+
+    success = am.set_user_config(
+        group_id, target_user.id,
+        fee_rate=fee_rate,
+        exchange_rate=exchange_rate,
+        per_transaction_fee=per_transaction_fee,
+        admin_id=admin_id
+    )
+
+    if success:
+        # 获取完整配置
+        config = am.get_effective_config(group_id, target_user.id, admin_id)
+
+        reply = f"✅ 已为 {display_name} 设置个性化配置\n\n"
+        reply += f"💰 手续费：{config['fee_rate']}%\n"
+        reply += f"💱 汇率：{config['exchange_rate']}\n"
+        reply += f"📝 单笔费用：{config['per_transaction_fee']} 元\n\n"
+        reply += "💡 该用户记账时将自动使用以上配置"
+    else:
+        reply = f"❌ 为 {display_name} 设置配置失败"
+
+    await message.reply_text(reply, parse_mode="Markdown")
+
+
+async def handle_delete_user_config(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    """处理删除指定人的个性化配置"""
+    message = update.message
+    chat = update.effective_chat
+
+    if chat.type not in ['group', 'supergroup']:
+        await message.reply_text("❌ 此功能仅在群组中可用")
+        return
+
+    user_id = message.from_user.id
+    admin_id = get_user_admin_id(user_id)
+
+    if not is_authorized(user_id, require_full_access=False):
+        await message.reply_text("❌ 您没有权限进行此操作")
+        return
+
+    # 获取目标用户
+    target_user = None
+
+    if message.reply_to_message:
+        target_user = message.reply_to_message.from_user
+    else:
+        if message.entities:
+            for entity in message.entities:
+                if entity.type == "text_mention" and entity.user:
+                    target_user = entity.user
+                    break
+                elif entity.type == "mention":
+                    username = text[entity.offset:entity.offset + entity.length].lstrip('@')
+                    from auth import admins
+                    for aid in admins.keys():
+                        from db_manager import get_conn
+                        conn = get_conn(aid)
+                        row = conn.execute(
+                            "SELECT user_id FROM group_users WHERE username = ? LIMIT 1",
+                            (username,)
+                        ).fetchone()
+                        if row:
+                            target_user = type('User', (), {
+                                'id': row[0],
+                                'first_name': username,
+                                'username': username
+                            })()
+                            break
+                    break
+
+    if not target_user:
+        await message.reply_text("❌ 请使用 @用户名 或回复用户消息来指定要删除配置的用户")
+        return
+
+    group_id = str(chat.id)
+    am = get_accounting_manager(admin_id)
+
+    # 先检查是否有配置
+    config = am.get_user_config(group_id, target_user.id, admin_id)
+
+    if not config.get("has_config"):
+        display_name = target_user.first_name or target_user.username or str(target_user.id)
+        await message.reply_text(f"❌ {display_name} 没有个性化配置")
+        return
+
+    # 删除配置
+    success = am.delete_user_config(group_id, target_user.id, admin_id)
+
+    if success:
+        display_name = target_user.first_name or target_user.username or str(target_user.id)
+        await message.reply_text(f"✅ 已删除 {display_name} 的个性化配置\n\n💡 该用户将使用群组默认配置")
+    else:
+        await message.reply_text("❌ 删除失败，请稍后重试")
+
+
+async def handle_view_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """查看群组的配置信息（包括个性化配置）"""
+    message = update.message
+    chat = update.effective_chat
+
+    if chat.type not in ['group', 'supergroup']:
+        await message.reply_text("❌ 此功能仅在群组中可用")
+        return
+
+    group_id = str(chat.id)
+    user_id = message.from_user.id
+    admin_id = get_user_admin_id(user_id)
+    am = get_accounting_manager(admin_id)
+
+    # 获取群组默认配置
+    session = am.get_or_create_session(group_id, admin_id)
+
+    reply = "⚙️ **群组配置信息**\n\n"
+    reply += "📋 **默认配置**\n"
+    reply += f"💰 手续费：{session['fee_rate']}%\n"
+    reply += f"💱 汇率：{session['exchange_rate']}\n"
+    reply += f"📝 单笔费用：{session.get('per_transaction_fee', 0)} 元\n"
+
+    # 获取个性化配置列表
+    user_configs = am.get_all_user_configs(group_id, admin_id)
+
+    if user_configs:
+        reply += f"\n👥 **个性化配置**（{len(user_configs)}人）\n"
+        for config in user_configs[:20]:  # 最多显示20个
+            display_name = config.get('first_name', '')
+            username = config.get('username', '')
+            if username and display_name:
+                display_name = f"{display_name} (@{username})"
+            elif username:
+                display_name = f"@{username}"
+            elif display_name:
+                pass
+            else:
+                display_name = f"用户{config['user_id']}"
+
+            reply += f"\n👤 {display_name}\n"
+            if config['fee_rate'] is not None:
+                reply += f"   手续费：{config['fee_rate']}%\n"
+            if config['exchange_rate'] is not None:
+                reply += f"   汇率：{config['exchange_rate']}\n"
+            if config['per_transaction_fee'] is not None:
+                reply += f"   单笔费用：{config['per_transaction_fee']} 元\n"
+
+        if len(user_configs) > 20:
+            reply += f"\n... 还有 {len(user_configs) - 20} 人有配置"
+    else:
+        reply += "\n👥 **个性化配置**：暂无"
+
+    await message.reply_text(reply, parse_mode="Markdown")
+
 async def handle_calculator(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat.type not in ['group', 'supergroup']:
@@ -3260,21 +3692,10 @@ def get_service_message_handler():
         handle_group_service_message
     )
 
-# ===== 在 accounting.py 文件中，找到 def get_conversation_handler(): =====
-# ===== 在它之前添加以下全部代码 =====
-
 # ---------- 美化 HTML 账单生成 ----------
-
 def generate_beautiful_bill_html(stats: Dict, records: List[Dict], title: str = "当前账单") -> str:
     """
     生成美化版 HTML 账单
-
-    Args:
-        stats: 统计信息字典
-        records: 记账记录列表
-        title: 账单标题
-    Returns:
-        HTML 字符串
     """
     from datetime import datetime
 
@@ -3321,37 +3742,176 @@ def generate_beautiful_bill_html(stats: Dict, records: List[Dict], title: str = 
             return str(int(num))
         return f"{num:.{decimals}f}"
 
-    # 生成表格行
+    # ========== 生成总体入款记录表格 ==========
     income_rows = ""
     for r in income_records:
         dt = beijing_time(r['created_at'])
-        time_str = dt.strftime('%m-%d %H:%M')
+        date_str = dt.strftime('%Y-%m-%d')
+        time_str = dt.strftime('%H:%M')
         cat = r.get('category', '') or ''
         flag = get_flag(cat)
         cat_display = f"{flag} {cat}" if flag else (cat or '无')
-        fee_info = f"{fmt(r.get('fee_rate', 0))}% / {fmt(r.get('rate', 0))}"
+        fr = r.get('fee_rate', 0)
+        rate = r.get('rate', 0)
+        per_fee = r.get('per_transaction_fee', 0)
+        fee_display = f"{fmt(fr)}%" if fr == int(fr) else f"{fr}%"
+        rate_display = fmt(rate) if rate == int(rate) else f"{rate:.2f}"
+        per_fee_display = f"{fmt(per_fee)}元" if per_fee > 0 else "-"
         operator = r.get('display_name', r.get('username', '未知'))
         income_rows += f"""
         <tr>
-            <td>{time_str}</td>
+            <td>{date_str} {time_str}</td>
             <td class="income-amount">+{fmt(r['amount'])}</td>
-            <td>{fee_info}</td>
+            <td>{fee_display}</td>
+            <td>{rate_display}</td>
+            <td>{per_fee_display}</td>
             <td class="usdt-amount">{fmt(r['amount_usdt'])} USDT</td>
             <td>{cat_display}</td>
             <td>{operator}</td>
         </tr>"""
 
+    # ========== 生成总体出款记录表格 ==========
     expense_rows = ""
     for r in expense_records:
         dt = beijing_time(r['created_at'])
-        time_str = dt.strftime('%m-%d %H:%M')
+        date_str = dt.strftime('%Y-%m-%d')
+        time_str = dt.strftime('%H:%M')
         operator = r.get('display_name', r.get('username', '未知'))
         expense_rows += f"""
         <tr>
-            <td>{time_str}</td>
+            <td>{date_str} {time_str}</td>
             <td class="expense-amount">-{fmt(r['amount_usdt'])} USDT</td>
             <td>{operator}</td>
         </tr>"""
+
+    # ========== 按操作人分组 ==========
+    operator_income = {}
+    for r in income_records:
+        operator = r.get('display_name', r.get('username', '未知'))
+        user_id = r.get('user_id', 0)
+        key = f"op_{user_id}_{hash(operator) % 10000}"
+        if key not in operator_income:
+            operator_income[key] = {
+                'name': operator,
+                'user_id': user_id,
+                'records': [],
+                'total_cny': 0.0,
+                'total_usdt': 0.0,
+            }
+        operator_income[key]['records'].append(r)
+        operator_income[key]['total_cny'] += r['amount']
+        operator_income[key]['total_usdt'] += r['amount_usdt']
+
+    operator_expense = {}
+    for r in expense_records:
+        operator = r.get('display_name', r.get('username', '未知'))
+        user_id = r.get('user_id', 0)
+        key = f"op_{user_id}_{hash(operator) % 10000}"
+        if key not in operator_expense:
+            operator_expense[key] = {
+                'name': operator,
+                'user_id': user_id,
+                'records': [],
+                'total_usdt': 0.0,
+            }
+        operator_expense[key]['records'].append(r)
+        operator_expense[key]['total_usdt'] += r['amount_usdt']
+
+    # ========== 生成每个操作人的可折叠记录 ==========
+    operator_sections = ""
+    all_operator_keys = set(list(operator_income.keys()) + list(operator_expense.keys()))
+
+    if all_operator_keys:
+        for idx, key in enumerate(sorted(all_operator_keys, key=lambda k: operator_income.get(k, {}).get('total_cny', 0), reverse=True)):
+            safe_key = key.replace('.', '_').replace('-', '_')
+            op_income = operator_income.get(key, {})
+            op_expense = operator_expense.get(key, {})
+
+            name = op_income.get('name') or op_expense.get('name', '未知')
+            income_count = len(op_income.get('records', []))
+            income_cny = op_income.get('total_cny', 0)
+            income_usdt = op_income.get('total_usdt', 0)
+            expense_count = len(op_expense.get('records', []))
+            expense_usdt = op_expense.get('total_usdt', 0)
+
+            operator_sections += f"""
+        <div class="card operator-card">
+            <div class="operator-header" onclick="toggleSection('op_{safe_key}')">
+                <span>👤 {name} · 入款{income_count}笔 {fmt(income_cny)}元 ≈ {fmt(income_usdt)}USDT · 出款{expense_count}笔 {fmt(expense_usdt)}USDT</span>
+                <span class="toggle-icon" id="icon_op_{safe_key}">▼</span>
+            </div>
+            <div class="operator-content" id="op_{safe_key}">
+"""
+            if op_income.get('records'):
+                operator_sections += f"""
+                <div style="margin-bottom:12px;">
+                    <div class="section-label">📈 入款明细（{income_count}笔）</div>
+                    <div class="table-responsive">
+                        <table>
+                            <thead>
+                                <tr><th>日期时间</th><th>金额(元)</th><th>手续费</th><th>汇率</th><th>单笔费用</th><th>USDT</th><th>分类</th></tr>
+                            </thead>
+                            <tbody>
+"""
+                for r in op_income['records']:
+                    dt = beijing_time(r['created_at'])
+                    date_str = dt.strftime('%Y-%m-%d')
+                    time_str = dt.strftime('%H:%M')
+                    cat = r.get('category', '') or ''
+                    flag = get_flag(cat)
+                    cat_display = f"{flag} {cat}" if flag else (cat or '无')
+                    fr = r.get('fee_rate', 0)
+                    rate = r.get('rate', 0)
+                    per_fee = r.get('per_transaction_fee', 0)
+                    fee_display = f"{fmt(fr)}%" if fr == int(fr) else f"{fr}%"
+                    rate_display = fmt(rate) if rate == int(rate) else f"{rate:.2f}"
+                    per_fee_display = f"{fmt(per_fee)}元" if per_fee > 0 else "-"
+                    operator_sections += f"""
+                                <tr>
+                                    <td>{date_str} {time_str}</td>
+                                    <td class="income-amount">+{fmt(r['amount'])}</td>
+                                    <td>{fee_display}</td>
+                                    <td>{rate_display}</td>
+                                    <td>{per_fee_display}</td>
+                                    <td class="usdt-amount">{fmt(r['amount_usdt'])} USDT</td>
+                                    <td>{cat_display}</td>
+                                </tr>"""
+                operator_sections += """
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+"""
+            if op_expense.get('records'):
+                operator_sections += f"""
+                <div>
+                    <div class="section-label">📉 出款明细（{expense_count}笔）</div>
+                    <div class="table-responsive">
+                        <table>
+                            <thead>
+                                <tr><th>日期时间</th><th>金额(USDT)</th></tr>
+                            </thead>
+                            <tbody>
+"""
+                for r in op_expense['records']:
+                    dt = beijing_time(r['created_at'])
+                    date_str = dt.strftime('%Y-%m-%d')
+                    time_str = dt.strftime('%H:%M')
+                    operator_sections += f"""
+                                <tr>
+                                    <td>{date_str} {time_str}</td>
+                                    <td class="expense-amount">-{fmt(r['amount_usdt'])} USDT</td>
+                                </tr>"""
+                operator_sections += """
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+"""
+            operator_sections += """
+            </div>
+        </div>
+"""
 
     # 分组统计
     group_stats = ""
@@ -3396,7 +3956,7 @@ def generate_beautiful_bill_html(stats: Dict, records: List[Dict], title: str = 
             min-height: 100vh;
             padding: 20px;
         }}
-        .container {{ max-width: 900px; margin: 0 auto; }}
+        .container {{ max-width: 1000px; margin: 0 auto; }}
         .header {{
             background: white;
             border-radius: 20px;
@@ -3459,11 +4019,83 @@ def generate_beautiful_bill_html(stats: Dict, records: List[Dict], title: str = 
             box-shadow: 0 2px 10px rgba(0,0,0,0.05);
         }}
         .card h2 {{
-            font-size: 18px;
+            font-size: 16px;
             color: #1e293b;
             margin-bottom: 16px;
             padding-bottom: 12px;
             border-bottom: 2px solid #f1f5f9;
+        }}
+        /* ===== 可折叠区域 ===== */
+        .collapsible-card {{
+            padding: 0;
+            overflow: hidden;
+        }}
+        .collapsible-header {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 14px 20px;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-weight: 600;
+            font-size: 15px;
+            user-select: none;
+            -webkit-tap-highlight-color: transparent;
+        }}
+        .collapsible-header:hover {{ opacity: 0.95; }}
+        .collapsible-header .toggle-icon {{
+            transition: transform 0.3s;
+            font-size: 14px;
+        }}
+        .collapsible-header.collapsed .toggle-icon {{
+            transform: rotate(-90deg);
+        }}
+        .collapsible-content {{
+            padding: 20px;
+        }}
+        .collapsible-content.collapsed {{
+            display: none;
+        }}
+        /* ===== 操作人卡片 ===== */
+        .operator-card {{
+            padding: 0;
+            overflow: hidden;
+        }}
+        .operator-header {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 14px 20px;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-weight: 600;
+            font-size: 15px;
+            user-select: none;
+            -webkit-tap-highlight-color: transparent;
+        }}
+        .operator-header:hover {{ opacity: 0.95; }}
+        .operator-header .toggle-icon {{
+            transition: transform 0.3s;
+            font-size: 14px;
+        }}
+        .operator-header.collapsed .toggle-icon {{
+            transform: rotate(-90deg);
+        }}
+        .operator-content {{
+            padding: 20px;
+        }}
+        .operator-content.collapsed {{
+            display: none;
+        }}
+        .section-label {{
+            font-size: 14px;
+            font-weight: 600;
+            color: #475569;
+            margin-bottom: 8px;
+            padding-left: 8px;
+            border-left: 4px solid #667eea;
         }}
         table {{
             width: 100%;
@@ -3498,6 +4130,7 @@ def generate_beautiful_bill_html(stats: Dict, records: List[Dict], title: str = 
             .header h1 {{ font-size: 20px; }}
             .summary-card .value {{ font-size: 18px; }}
             th, td {{ padding: 8px 6px; font-size: 11px; }}
+            .collapsible-header, .operator-header {{ font-size: 13px; padding: 12px 14px; }}
         }}
     </style>
 </head>
@@ -3544,39 +4177,71 @@ def generate_beautiful_bill_html(stats: Dict, records: List[Dict], title: str = 
 
         {category_section}
 
-        <div class="card">
-            <h2>📈 入款记录（{len(income_records)}笔）</h2>
-            <div class="table-responsive">
-                <table>
-                    <thead>
-                        <tr><th>日期时间</th><th>金额(元)</th><th>费率/汇率</th><th>到账(USDT)</th><th>分类</th><th>操作人</th></tr>
-                    </thead>
-                    <tbody>{income_rows if income_rows else '<tr><td colspan="6" style="text-align:center;color:#999;">暂无入款记录</td></tr>'}</tbody>
-                </table>
+        <!-- ===== 所有入款记录（可折叠） ===== -->
+        <div class="card collapsible-card">
+            <div class="collapsible-header" onclick="toggleSection('all_income')">
+                <span>📈 所有入款记录（{len(income_records)}笔）</span>
+                <span class="toggle-icon" id="icon_all_income">▼</span>
+            </div>
+            <div class="collapsible-content" id="all_income">
+                <div class="table-responsive">
+                    <table>
+                        <thead>
+                            <tr><th>日期时间</th><th>金额(元)</th><th>手续费</th><th>汇率</th><th>单笔费用</th><th>USDT</th><th>分类</th><th>操作人</th></tr>
+                        </thead>
+                        <tbody>{income_rows if income_rows else '<tr><td colspan="8" style="text-align:center;color:#999;">暂无入款记录</td></tr>'}</tbody>
+                    </table>
+                </div>
             </div>
         </div>
 
-        <div class="card">
-            <h2>📉 出款记录（{len(expense_records)}笔）</h2>
-            <div class="table-responsive">
-                <table>
-                    <thead>
-                        <tr><th>日期时间</th><th>金额(USDT)</th><th>操作人</th></tr>
-                    </thead>
-                    <tbody>{expense_rows if expense_rows else '<tr><td colspan="3" style="text-align:center;color:#999;">暂无出款记录</td></tr>'}</tbody>
-                </table>
+        <!-- ===== 所有出款记录（可折叠） ===== -->
+        <div class="card collapsible-card">
+            <div class="collapsible-header" onclick="toggleSection('all_expense')">
+                <span>📉 所有出款记录（{len(expense_records)}笔）</span>
+                <span class="toggle-icon" id="icon_all_expense">▼</span>
+            </div>
+            <div class="collapsible-content" id="all_expense">
+                <div class="table-responsive">
+                    <table>
+                        <thead>
+                            <tr><th>日期时间</th><th>金额(USDT)</th><th>操作人</th></tr>
+                        </thead>
+                        <tbody>{expense_rows if expense_rows else '<tr><td colspan="3" style="text-align:center;color:#999;">暂无出款记录</td></tr>'}</tbody>
+                    </table>
+                </div>
             </div>
         </div>
+
+        <!-- ===== 各操作人详细记录 ===== -->
+        <h2 style="color:white; margin: 24px 0 16px 0; font-size: 20px;">👤 各操作人详细记录</h2>
+        {operator_sections}
 
         <div class="footer">
             由 Telegram 记账机器人自动生成
         </div>
     </div>
+
+    <script>
+        function toggleSection(id) {{
+            var content = document.getElementById(id);
+            if (!content) return;
+            var header = content.previousElementSibling;
+            var icon = document.getElementById('icon_' + id);
+
+            if (content.classList.contains('collapsed')) {{
+                content.classList.remove('collapsed');
+                header.classList.remove('collapsed');
+            }} else {{
+                content.classList.add('collapsed');
+                header.classList.add('collapsed');
+            }}
+        }}
+    </script>
 </body>
 </html>"""
 
     return html
-
 
 async def handle_view_current_bill(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理「查看当前账单」按钮回调，生成 HTML 文件并发送"""
@@ -3732,6 +4397,244 @@ async def handle_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== 群组消息主处理函数 ====================
 
+async def handle_operator_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理群组内通过 @ 添加/删除临时操作人"""
+    message = update.message
+    chat = update.effective_chat
+    user = message.from_user  # ✅ 这个函数是独立的，可以正确定义 user
+    user_id = user.id
+    text = message.text.strip()
+
+    # 权限检查
+    from auth import is_authorized, get_user_admin_id
+    if not is_authorized(user_id, require_full_access=False):  # ✅ 使用 user_id
+        await message.reply_text("❌ 您没有权限管理操作人")
+        return
+
+    admin_id = get_user_admin_id(user_id)
+    if admin_id == 0:
+        await message.reply_text("❌ 您不是任何管理员，无法管理操作人")
+        return
+
+    is_add = text.startswith('添加操作人')
+    is_remove = text.startswith('删除操作人')
+
+    # 获取消息中 @ 的用户
+    mentioned_users = []
+    if message.entities:
+        for entity in message.entities:
+            if entity.type == "text_mention" and entity.user:
+                mentioned_users.append(entity.user)
+            elif entity.type == "mention":
+                username = text[entity.offset:entity.offset + entity.length].lstrip('@')
+                mentioned_users.append(username)
+
+    if not mentioned_users:
+        await message.reply_text(
+            f"❌ 请使用 @ 指定用户\n\n"
+            f"用法示例：\n"
+            f"`添加操作人 @username1 @username2`\n"
+            f"`删除操作人 @username1 @username2`",
+            parse_mode="Markdown"
+        )
+        return
+
+    # 解析用户
+    from auth import batch_add_temp_operators, batch_remove_temp_operators
+
+    user_ids_to_process = []
+    user_info_list = []
+
+    for mentioned in mentioned_users:
+        if isinstance(mentioned, str):
+            found = False
+            from auth import admins
+            for aid in admins.keys():
+                from db_manager import get_conn
+                conn = get_conn(aid)
+                row = conn.execute(
+                    "SELECT user_id, first_name, username FROM group_users WHERE username = ? LIMIT 1",
+                    (mentioned,)
+                ).fetchone()
+                if row:
+                    user_ids_to_process.append(row[0])
+                    user_info_list.append({
+                        "id": row[0],
+                        "name": row[1] or row[2] or mentioned
+                    })
+                    found = True
+                    break
+            if not found:
+                user_info_list.append({
+                    "id": None,
+                    "name": f"@{mentioned}",
+                    "unknown": True
+                })
+        else:
+            user_ids_to_process.append(mentioned.id)
+            user_info_list.append({
+                "id": mentioned.id,
+                "name": mentioned.first_name or mentioned.username or str(mentioned.id)
+            })
+
+    valid_ids = [u["id"] for u in user_info_list if u["id"] is not None and not u.get("unknown")]
+    unknown_users = [u for u in user_info_list if u.get("unknown")]
+
+    if is_add:
+        if not valid_ids:
+            if unknown_users:
+                await message.reply_text(
+                    f"❌ 无法找到以下用户，请确认用户名正确：\n"
+                    + "\n".join([f"• {u['name']}" for u in unknown_users]) +
+                    "\n\n💡 提示：请使用 @用户名 或直接回复用户消息"
+                )
+            return
+
+        results = await batch_add_temp_operators(valid_ids, admin_id, context)
+
+        reply_parts = []
+        if results["success"]:
+            success_names = [next((u["name"] for u in user_info_list if u["id"] == uid), str(uid)) for uid in results["success"]]
+            reply_parts.append(f"✅ 已添加临时操作人：{', '.join(success_names)}")
+        if results["already_exists"]:
+            exists_names = [next((u["name"] for u in user_info_list if u["id"] == uid), str(uid)) for uid in results["already_exists"]]
+            reply_parts.append(f"⚠️ 以下用户已是操作人：{', '.join(exists_names)}")
+        if results["failed"]:
+            failed_names = [next((u["name"] for u in user_info_list if u["id"] == uid), str(uid)) for uid in results["failed"]]
+            reply_parts.append(f"❌ 添加失败：{', '.join(failed_names)}")
+        if unknown_users:
+            reply_parts.append(f"❓ 未找到：{', '.join([u['name'] for u in unknown_users])}")
+
+        reply = "\n".join(reply_parts)
+        reply += "\n\n💡 临时操作人只能使用记账功能"
+
+    elif is_remove:
+        if not valid_ids:
+            if unknown_users:
+                await message.reply_text(
+                    f"❌ 无法找到以下用户：\n"
+                    + "\n".join([f"• {u['name']}" for u in unknown_users])
+                )
+            return
+
+        results = batch_remove_temp_operators(valid_ids)
+
+        reply_parts = []
+        if results["success"]:
+            success_names = [next((u["name"] for u in user_info_list if u["id"] == uid), str(uid)) for uid in results["success"]]
+            reply_parts.append(f"✅ 已删除临时操作人：{', '.join(success_names)}")
+        if results["not_found"]:
+            notfound_names = [next((u["name"] for u in user_info_list if u["id"] == uid), str(uid)) for uid in results["not_found"]]
+            reply_parts.append(f"⚠️ 以下用户不是临时操作人：{', '.join(notfound_names)}")
+        if results["failed"]:
+            failed_names = [next((u["name"] for u in user_info_list if u["id"] == uid), str(uid)) for uid in results["failed"]]
+            reply_parts.append(f"❌ 删除失败：{', '.join(failed_names)}")
+        if unknown_users:
+            reply_parts.append(f"❓ 未找到：{', '.join([u['name'] for u in unknown_users])}")
+
+        reply = "\n".join(reply_parts)
+
+    await message.reply_text(reply)
+
+async def handle_batch_settings(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    """处理组合设置：同时设置手续费、汇率、单笔费用"""
+    message = update.message
+    chat = update.effective_chat
+
+    if chat.type not in ['group', 'supergroup']:
+        await message.reply_text("❌ 此功能仅在群组中可用")
+        return
+
+    # ✅ 使用通用解析函数
+    fee_rate, exchange_rate, per_transaction_fee = parse_batch_settings(text)
+
+    if fee_rate is None and exchange_rate is None and per_transaction_fee is None:
+        await message.reply_text(
+            "❌ 未识别到有效的设置参数\n\n"
+            "💡 用法示例：\n"
+            "`设置手续费2 设置汇率20 设置单笔费用15`\n"
+            "`设置汇率20 设置手续费2 设置单笔费用15`",
+            parse_mode="Markdown"
+        )
+        return
+
+    group_id = str(chat.id)
+    user_id = message.from_user.id
+    admin_id = get_user_admin_id(user_id)
+    am = get_accounting_manager(admin_id)
+
+    results = []
+
+    if fee_rate is not None:
+        success = am.set_fee_rate(group_id, fee_rate, admin_id)
+        if success:
+            fee_display = int(fee_rate) if fee_rate == int(fee_rate) else fee_rate
+            results.append(f"✅ 手续费率已设置为：{fee_display}%")
+        else:
+            results.append("❌ 手续费率设置失败")
+
+    if exchange_rate is not None:
+        success = am.set_exchange_rate(group_id, exchange_rate, admin_id)
+        if success:
+            rate_display = int(exchange_rate) if exchange_rate == int(exchange_rate) else exchange_rate
+            results.append(f"✅ 汇率已设置为：{rate_display}")
+        else:
+            results.append("❌ 汇率设置失败")
+
+    if per_transaction_fee is not None:
+        success = am.set_per_transaction_fee(group_id, per_transaction_fee, admin_id)
+        if success:
+            fee_display = int(per_transaction_fee) if per_transaction_fee == int(per_transaction_fee) else per_transaction_fee
+            results.append(f"✅ 单笔费用已设置为：{fee_display} 元")
+        else:
+            results.append("❌ 单笔费用设置失败")
+
+    reply = "⚙️ **组合设置结果**\n\n" + "\n".join(results)
+
+    if any("✅" in r for r in results):
+        session = am.get_or_create_session(group_id, admin_id)
+        reply += "\n\n📋 **当前默认配置**\n"
+        reply += f"💰 手续费：{session['fee_rate']}%\n"
+        reply += f"💱 汇率：{session['exchange_rate']}\n"
+        reply += f"📝 单笔费用：{session.get('per_transaction_fee', 0)} 元"
+
+    await message.reply_text(reply, parse_mode="Markdown")
+
+
+def parse_batch_settings(text: str):
+    """
+    解析组合设置文本，支持多种格式和任意顺序：
+    - 设置手续费2 设置汇率20 设置单笔费用15
+    - 设置汇率20 手续费3 单笔费用2
+    - 设置 @xxx 手续费5 汇率10 单笔费用12
+    """
+    import re
+
+    fee_rate = None
+    exchange_rate = None
+    per_transaction_fee = None
+
+    # 先移除 @用户名 部分，避免干扰数字匹配
+    clean_text = re.sub(r'@\S+', '', text)
+
+    # ✅ 提取手续费（同时支持"设置手续费"和单独的"手续费"）
+    fee_match = re.search(r'(?:设置)?手续费\s*(\d+(?:\.\d+)?)', clean_text)
+    if fee_match:
+        fee_rate = float(fee_match.group(1))
+
+    # ✅ 提取汇率（同时支持"设置汇率"和单独的"汇率"）
+    rate_match = re.search(r'(?:设置)?汇率\s*(\d+(?:\.\d+)?)', clean_text)
+    if rate_match:
+        exchange_rate = float(rate_match.group(1))
+
+    # ✅ 提取单笔费用（同时支持"设置单笔费用"和单独的"单笔费用"）
+    fee_per_match = re.search(r'(?:设置)?单笔费用\s*(\d+(?:\.\d+)?)', clean_text)
+    if fee_per_match:
+        per_transaction_fee = float(fee_per_match.group(1))
+
+    return fee_rate, exchange_rate, per_transaction_fee
+
+
 async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     message = update.message
@@ -3742,7 +4645,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     admin_id = get_user_admin_id(user_id)
     am = get_accounting_manager(admin_id)
 
-    # USDT 地址查询（不需要权限）
+    # ========== USDT 地址查询（不需要权限）==========
     is_addr, address, chain_type = is_valid_address(text)
     if is_addr:
         user = message.from_user
@@ -3754,11 +4657,10 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             result = await query_erc20_balance(address)
         if result.get('success'):
             balance = result['balance']
-            stats = None  # ✅ 初始化
+            stats = None
             if am:
                 am.record_address_query(group_id, address, chain_type, user.id, user.username or user.first_name, balance, admin_id)
                 stats = am.get_address_stats(address, admin_id)
-            # ✅ 判断 stats 是否存在
             if stats:
                 first_time = datetime.fromtimestamp(stats['first_query']).strftime('%Y-%m-%d %H:%M') if stats.get('first_query') else '首次'
                 last_time = datetime.fromtimestamp(stats['last_query']).strftime('%Y-%m-%d %H:%M') if stats.get('last_query') else '刚刚'
@@ -3777,19 +4679,91 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await status_msg.edit_text(f"❌ 查询失败：{error_msg}")
         return
 
-    # 追踪用户信息
-    await handle_user_info_tracking(update, context)
+    # ========== 判断是否跳过用户信息追踪 ==========
+    is_user_config_cmd = (
+        ('设置' in text and ('手续费' in text or '汇率' in text or '单笔费用' in text) and 
+         ('@' in text or (message.reply_to_message and message.reply_to_message.from_user))) or
+        (text.startswith('删除') and '配置' in text) or
+        (text == '查看配置' or text == '查看设置') or
+        (text.count('设置手续费') + text.count('设置汇率') + text.count('设置单笔费用') >= 2) or
+        ('设置' in text and sum([1 for k in ['手续费', '汇率', '单笔费用'] if k in text]) >= 2) or
+        (text.startswith('添加操作人') or text.startswith('删除操作人'))
+    )
+
+    if not is_user_config_cmd:
+        await handle_user_info_tracking(update, context)
 
     if not text:
         return
 
-    # 计算器
-    await handle_calculator(update, context)
-
-    # 权限检查
-    if not is_authorized(message.from_user.id, require_full_access=False):
+    # ========== 操作人管理（@方式）==========
+    if message.reply_to_message and text in ['添加操作人', '删除操作人']:
+        if not is_authorized(user_id, require_full_access=False):
+            await message.reply_text("❌ 您没有权限管理操作人")
+            return
+        replied_user = message.reply_to_message.from_user
+        if admin_id == 0:
+            await message.reply_text("❌ 您不是任何管理员，无法管理操作人")
+            return
+        from auth import add_temp_operator, remove_temp_operator
+        if text == '添加操作人':
+            result = await add_temp_operator(replied_user.id, admin_id, context)
+            if result:
+                display_name = replied_user.first_name or replied_user.username or str(replied_user.id)
+                await message.reply_text(f"✅ 已添加临时操作人：{display_name}\n💡 临时操作人只能使用记账功能")
+            else:
+                await message.reply_text("❌ 添加失败，该用户可能已是操作人")
+        elif text == '删除操作人':
+            result = remove_temp_operator(replied_user.id)
+            if result:
+                display_name = replied_user.first_name or replied_user.username or str(replied_user.id)
+                await message.reply_text(f"✅ 已删除临时操作人：{display_name}")
+            else:
+                await message.reply_text("❌ 该用户不是临时操作人")
         return
 
+    if text.startswith('添加操作人') or text.startswith('删除操作人'):
+        await handle_operator_mention(update, context)
+        return
+
+    # ========== 计算器 ==========
+    await handle_calculator(update, context)
+
+    # ========== 权限检查 ==========
+    if not is_authorized(user_id, require_full_access=False):
+        return
+
+    # ========== 用户个性化配置（带 @ 或回复消息）==========
+    if '设置' in text and ('手续费' in text or '汇率' in text or '单笔费用' in text) and ('@' in text or message.reply_to_message):
+        await handle_user_config_settings(update, context, text)
+        return
+
+    # ========== 删除指定人配置 ==========
+    if text.startswith('删除') and '配置' in text and ('@' in text or message.reply_to_message):
+        await handle_delete_user_config(update, context, text)
+        return
+
+    # ========== 查看配置 ==========
+    if text == '查看配置' or text == '查看设置':
+        await handle_view_config(update, context)
+        return
+
+    # ========== 组合/批量设置（多个参数）==========
+    # 统计带"设置"前缀的次数
+    settings_with_prefix = sum([
+        text.count('设置手续费'),
+        text.count('设置汇率'),
+        text.count('设置单笔费用')
+    ])
+    # 统计参数关键字出现次数
+    params_count = sum([1 for k in ['手续费', '汇率', '单笔费用'] if k in text])
+
+    # 判断是否为组合设置
+    if settings_with_prefix >= 2 or (text.startswith('设置') and params_count >= 2):
+        await handle_batch_settings(update, context, text)
+        return
+
+    # ========== 单独设置命令 ==========
     if text.startswith('设置手续费'):
         try:
             rate_str = text.replace('设置手续费', '').strip()
@@ -3821,6 +4795,8 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception as e:
             await message.reply_text(f"❌ 设置失败：{str(e)[:50]}")
         return
+
+    # ========== 账单命令 ==========
     elif text == '结束账单':
         await handle_end_bill(update, context)
         return
@@ -3836,7 +4812,6 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     elif text == '查询账单':
         await handle_query_bill(update, context, admin_id=admin_id)
         return
-    # ✅ 修改后
     elif text == '导出账单':
         await handle_export_bill(update, context)
         return
@@ -3852,6 +4827,8 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     elif text == '撤销账单':
         await handle_revoke_record(update, context)
         return
+
+    # ========== 入款 +金额 ==========
     elif text.startswith('+'):
         try:
             content = text[1:].strip()
@@ -3914,13 +4891,15 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                        category=category, temp_rate=temp_rate, temp_fee=temp_fee,
                        admin_id=admin_id)
             else:
-                await message.reply_text("❌ 格式错误：+金额 或 +金额*手续费% 或 +金额/汇率 或 +金额*手续费%/汇率 或 +金额 备注")
+                await message.reply_text("❌ 格式错误")
         except ValueError:
             await message.reply_text("❌ 金额格式错误，请输入数字")
         except Exception as e:
             logger.error(f"解析入款失败: {e}")
-            await message.reply_text("❌ 格式错误：+金额 或 +金额*手续费% 或 +金额/汇率 或 +金额*手续费%/汇率 或 +金额 备注")
+            await message.reply_text("❌ 格式错误")
         return
+
+    # ========== 修正入款 -金额 ==========
     elif text.startswith('-') and len(text) > 1:
         try:
             content = text[1:].strip()
@@ -3983,13 +4962,15 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                        category=category, temp_rate=temp_rate, temp_fee=temp_fee,
                        admin_id=admin_id)
             else:
-                await message.reply_text("❌ 格式错误：-金额 或 -金额*手续费% 或 -金额/汇率 或 -金额*手续费%/汇率 或 -金额 备注")
+                await message.reply_text("❌ 格式错误")
         except ValueError:
             await message.reply_text("❌ 金额格式错误，请输入数字")
         except Exception as e:
             logger.error(f"解析修正入款失败: {e}")
-            await message.reply_text("❌ 格式错误：-金额 或 -金额*手续费% 或 -金额/汇率 或 -金额*手续费%/汇率 或 -金额 备注")
+            await message.reply_text("❌ 格式错误")
         return
+
+    # ========== 出款 下发金额u ==========
     elif text.startswith('下发') and 'u' in text and not text.startswith('下发-'):
         try:
             amount_str = text.replace('下发', '').replace('u', '').strip()
@@ -4001,6 +4982,8 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         except:
             await message.reply_text("❌ 格式错误：下发金额u（如：下发100u）")
         return
+
+    # ========== 修正出款 下发-金额u ==========
     elif text.startswith('下发-') and 'u' in text:
         try:
             amount_str = text.replace('下发-', '').replace('u', '').strip()
@@ -4013,7 +4996,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await message.reply_text("❌ 格式错误：下发-金额u（如：下发-50u）")
         return
 
-    # AI 对话
+    # ========== AI 对话 ==========
     bot_username = context.bot.username
     is_at_bot = text.startswith(f"@{bot_username}") or f"@{bot_username}" in text
     if is_at_bot:
