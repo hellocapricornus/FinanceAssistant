@@ -397,114 +397,114 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
             operator_expense[key]['records'].append(r)
             operator_expense[key]['total_usdt'] += r['amount_usdt']
 
-        # ========== 生成每个操作人的可折叠记录（按日期分组） ==========
-        operator_sections = ""
-        all_operator_keys = set(list(operator_income.keys()) + list(operator_expense.keys()))
+    # ========== 生成每个操作人的可折叠记录（按日期分组） ==========
+    operator_sections = ""
+    all_operator_keys = set(list(operator_income.keys()) + list(operator_expense.keys()))
 
-        if all_operator_keys:
-            for idx, key in enumerate(sorted(all_operator_keys, key=lambda k: operator_income.get(k, {}).get('total_cny', 0), reverse=True)):
-                safe_key = key.replace('.', '_').replace('-', '_')
-                op_income = operator_income.get(key, {})
-                op_expense = operator_expense.get(key, {})
+    if all_operator_keys:
+        for idx, key in enumerate(sorted(all_operator_keys, key=lambda k: operator_income.get(k, {}).get('total_cny', 0), reverse=True)):
+            safe_key = key.replace('.', '_').replace('-', '_')
+            op_income = operator_income.get(key, {})
+            op_expense = operator_expense.get(key, {})
 
-                name = op_income.get('name') or op_expense.get('name', '未知')
-                income_count = len(op_income.get('records', []))
-                income_cny = op_income.get('total_cny', 0)
-                income_usdt = op_income.get('total_usdt', 0)
-                expense_count = len(op_expense.get('records', []))
-                expense_usdt = op_expense.get('total_usdt', 0)
+            name = op_income.get('name') or op_expense.get('name', '未知')
+            income_count = len(op_income.get('records', []))
+            income_cny = op_income.get('total_cny', 0)
+            income_usdt = op_income.get('total_usdt', 0)
+            expense_count = len(op_expense.get('records', []))
+            expense_usdt = op_expense.get('total_usdt', 0)
 
-                # ✅ 按日期分组
-                op_income_by_date = {}
-                for r in op_income.get('records', []):
-                    date = r.get('date', '未知日期')
-                    if date not in op_income_by_date:
-                        op_income_by_date[date] = []
-                    op_income_by_date[date].append(r)
+            # ✅ 按日期分组
+            op_income_by_date = {}
+            for r in op_income.get('records', []):
+                date = r.get('date', '未知日期')
+                if date not in op_income_by_date:
+                    op_income_by_date[date] = []
+                op_income_by_date[date].append(r)
 
-                op_expense_by_date = {}
-                for r in op_expense.get('records', []):
-                    date = r.get('date', '未知日期')
-                    if date not in op_expense_by_date:
-                        op_expense_by_date[date] = []
-                    op_expense_by_date[date].append(r)
+            op_expense_by_date = {}
+            for r in op_expense.get('records', []):
+                date = r.get('date', '未知日期')
+                if date not in op_expense_by_date:
+                    op_expense_by_date[date] = []
+                op_expense_by_date[date].append(r)
 
-                operator_sections += f'''
-            <div class="date-group operator-group">
-                <div class="date-header" onclick="toggleSection(this)">
-                    <span>👤 {name} · 入款{income_count}笔 {fmt(income_cny)}元 ≈ {fmt(income_usdt)}USDT · 出款{expense_count}笔 {fmt(expense_usdt)}USDT</span>
-                    <span class="toggle-icon">▼</span>
-                </div>
-                <div class="date-content">
-    '''
-
-                # ✅ 按日期显示入款
-                for date, date_records in sorted(op_income_by_date.items()):
-                    date_cny = sum(r['amount'] for r in date_records)
-                    date_usdt = sum(r['amount_usdt'] for r in date_records)
-                    operator_sections += f'''
-                    <div class="section-title">📈 {date} · 入款{len(date_records)}笔 · {fmt(date_cny)}元 ≈ {fmt(date_usdt)}USDT</div>
-                    <table>
-                        <thead>
-                            <tr><th>时间</th><th>金额(元)</th><th>手续费</th><th>汇率</th><th>单笔费用</th><th>USDT</th><th>分类</th></tr>
-                        </thead>
-                        <tbody>
-    '''
-                    for r in date_records:
-                        dt = beijing_time(r['created_at'])
-                        time_str = dt.strftime('%H:%M')
-                        cat = r.get('category', '') or ''
-                        flag = get_flag(cat)
-                        cat_display = f"{flag} {cat}" if flag else (cat or '无')
-                        fr = r.get('fee_rate', 0)
-                        rate = r.get('rate', 0)
-                        per_fee = r.get('per_transaction_fee', 0)
-                        fee_display = f"{fmt(fr)}%" if fr == int(fr) else f"{fr}%"
-                        rate_display = fmt(rate) if rate == int(rate) else f"{rate:.2f}"
-                        per_fee_display = f"{fmt(per_fee)}元" if per_fee > 0 else "-"
-                        operator_sections += f'''
-                            <tr>
-                                <td class="record-time">{time_str}</td>
-                                <td class="record-amount income">+{fmt(r['amount'])}</td>
-                                <td class="record-fee">{fee_display}</td>
-                                <td>{rate_display}</td>
-                                <td>{per_fee_display}</td>
-                                <td>{fmt(r['amount_usdt'])}</td>
-                                <td>{cat_display}</td>
-                            </tr>'''
-                    operator_sections += '''
-                        </tbody>
-                    </table>
-    '''
-
-                # ✅ 按日期显示出款
-                for date, date_records in sorted(op_expense_by_date.items()):
-                    date_usdt = sum(r['amount_usdt'] for r in date_records)
-                    operator_sections += f'''
-                    <div class="section-title expense">📉 {date} · 出款{len(date_records)}笔 · {fmt(date_usdt)}USDT</div>
-                    <table>
-                        <thead>
-                            <tr><th>时间</th><th>金额(USDT)</th></tr>
-                        </thead>
-                        <tbody>
-    '''
-                    for r in date_records:
-                        dt = beijing_time(r['created_at'])
-                        time_str = dt.strftime('%H:%M')
-                        operator_sections += f'''
-                            <tr>
-                                <td class="record-time">{time_str}</td>
-                                <td class="record-amount" style="color:#ef4444;">-{fmt(r['amount_usdt'])}</td>
-                            </tr>'''
-                    operator_sections += '''
-                        </tbody>
-                    </table>
-    '''
-
-                operator_sections += '''
-                </div>
+            operator_sections += f'''
+        <div class="date-group operator-group">
+            <div class="date-header" onclick="toggleSection(this)">
+                <span>👤 {name} · 入款{income_count}笔 {fmt(income_cny)}元 ≈ {fmt(income_usdt)}USDT · 出款{expense_count}笔 {fmt(expense_usdt)}USDT</span>
+                <span class="toggle-icon">▼</span>
             </div>
-    '''
+            <div class="date-content">
+'''
+
+            # ✅ 按日期显示入款
+            for date, date_records in sorted(op_income_by_date.items()):
+                date_cny = sum(r['amount'] for r in date_records)
+                date_usdt = sum(r['amount_usdt'] for r in date_records)
+                operator_sections += f'''
+                <div class="section-title">📈 {date} · 入款{len(date_records)}笔 · {fmt(date_cny)}元 ≈ {fmt(date_usdt)}USDT</div>
+                <table>
+                    <thead>
+                        <tr><th>时间</th><th>金额(元)</th><th>手续费</th><th>汇率</th><th>单笔费用</th><th>USDT</th><th>分类</th></tr>
+                    </thead>
+                    <tbody>
+'''
+                for r in date_records:
+                    dt = beijing_time(r['created_at'])
+                    time_str = dt.strftime('%H:%M')
+                    cat = r.get('category', '') or ''
+                    flag = get_flag(cat)
+                    cat_display = f"{flag} {cat}" if flag else (cat or '无')
+                    fr = r.get('fee_rate', 0)
+                    rate = r.get('rate', 0)
+                    per_fee = r.get('per_transaction_fee', 0)
+                    fee_display = f"{fmt(fr)}%" if fr == int(fr) else f"{fr}%"
+                    rate_display = fmt(rate) if rate == int(rate) else f"{rate:.2f}"
+                    per_fee_display = f"{fmt(per_fee)}元" if per_fee > 0 else "-"
+                    operator_sections += f'''
+                        <tr>
+                            <td class="record-time">{time_str}</td>
+                            <td class="record-amount income">+{fmt(r['amount'])}</td>
+                            <td class="record-fee">{fee_display}</td>
+                            <td>{rate_display}</td>
+                            <td>{per_fee_display}</td>
+                            <td>{fmt(r['amount_usdt'])}</td>
+                            <td>{cat_display}</td>
+                        </tr>'''
+                operator_sections += '''
+                    </tbody>
+                </table>
+'''
+
+            # ✅ 按日期显示出款
+            for date, date_records in sorted(op_expense_by_date.items()):
+                date_usdt = sum(r['amount_usdt'] for r in date_records)
+                operator_sections += f'''
+                <div class="section-title expense">📉 {date} · 出款{len(date_records)}笔 · {fmt(date_usdt)}USDT</div>
+                <table>
+                    <thead>
+                        <tr><th>时间</th><th>金额(USDT)</th></tr>
+                    </thead>
+                    <tbody>
+'''
+                for r in date_records:
+                    dt = beijing_time(r['created_at'])
+                    time_str = dt.strftime('%H:%M')
+                    operator_sections += f'''
+                        <tr>
+                            <td class="record-time">{time_str}</td>
+                            <td class="record-amount" style="color:#ef4444;">-{fmt(r['amount_usdt'])}</td>
+                        </tr>'''
+                operator_sections += '''
+                    </tbody>
+                </table>
+'''
+
+            operator_sections += '''
+            </div>
+        </div>
+'''
 
     # 生成 HTML
     html = f'''<!DOCTYPE html>
