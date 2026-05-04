@@ -216,6 +216,18 @@ def init_admin_db(admin_id: int):
             updated_at INTEGER DEFAULT 0
         );
 
+        -- 用户个性化配置表
+        CREATE TABLE IF NOT EXISTS user_config (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            fee_rate REAL,
+            exchange_rate REAL,
+            per_transaction_fee REAL,
+            updated_at INTEGER DEFAULT 0,
+            UNIQUE(group_id, user_id)
+        );
+
         -- 索引
         CREATE INDEX IF NOT EXISTS idx_records_group_id ON accounting_records(group_id);
         CREATE INDEX IF NOT EXISTS idx_records_session_id ON accounting_records(session_id);
