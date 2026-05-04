@@ -3928,34 +3928,61 @@ def generate_beautiful_bill_html(stats: Dict, records: List[Dict], title: str = 
         </div>
 """
 
-    # 分组统计
-    group_stats = ""
+    # 分组统计 - 可折叠版（显示汇总+详细记录）
+    category_section = ""
     if categories:
+        category_section = """
+        <h2 style="color:white; margin: 24px 0 16px 0; font-size: 20px;">📊 入款分组统计</h2>
+"""
         for cat, group_records in categories.items():
             cat_cny = sum(r['amount'] for r in group_records)
             cat_usdt = sum(r['amount_usdt'] for r in group_records)
             flag = get_flag(cat)
             cat_display = f"{flag} {cat}" if flag else cat
-            group_stats += f"""
-            <tr>
-                <td>{cat_display}</td>
-                <td>{len(group_records)}笔</td>
-                <td>{fmt(cat_cny)} 元</td>
-                <td>{fmt(cat_usdt)} USDT</td>
-            </tr>"""
+            safe_cat = cat.replace('.', '_').replace('-', '_').replace(' ', '_')
 
-    category_section = ""
-    if group_stats:
-        category_section = f"""
-        <div class="card">
-            <h2>📊 入款分组统计</h2>
-            <table>
-                <thead>
-                    <tr><th>分类</th><th>笔数</th><th>金额(元)</th><th>金额(USDT)</th></tr>
-                </thead>
-                <tbody>{group_stats}</tbody>
-            </table>
-        </div>"""
+            category_section += f"""
+        <div class="card collapsible-card">
+            <div class="collapsible-header" onclick="toggleSection('cat_{safe_cat}')">
+                <span>📊 {cat_display} · {len(group_records)}笔 · {fmt(cat_cny)}元 ≈ {fmt(cat_usdt)}USDT</span>
+                <span class="toggle-icon" id="icon_cat_{safe_cat}">▼</span>
+            </div>
+            <div class="collapsible-content" id="cat_{safe_cat}">
+                <div class="table-responsive">
+                    <table>
+                        <thead>
+                            <tr><th>日期时间</th><th>金额(元)</th><th>手续费</th><th>汇率</th><th>单笔费用</th><th>USDT</th><th>操作人</th></tr>
+                        </thead>
+                        <tbody>
+    """
+            for r in group_records:
+                dt = beijing_time(r['created_at'])
+                date_str = dt.strftime('%Y-%m-%d')
+                time_str = dt.strftime('%H:%M')
+                fr = r.get('fee_rate', 0)
+                rate = r.get('rate', 0)
+                per_fee = r.get('per_transaction_fee', 0)
+                fee_display = f"{fmt(fr)}%" if fr == int(fr) else f"{fr}%"
+                rate_display = fmt(rate) if rate == int(rate) else f"{rate:.2f}"
+                per_fee_display = f"{fmt(per_fee)}元" if per_fee > 0 else "-"
+                operator = r.get('display_name', r.get('username', '未知'))
+                category_section += f"""
+                            <tr>
+                                <td>{date_str} {time_str}</td>
+                                <td class="income-amount">+{fmt(r['amount'])}</td>
+                                <td>{fee_display}</td>
+                                <td>{rate_display}</td>
+                                <td>{per_fee_display}</td>
+                                <td class="usdt-amount">{fmt(r['amount_usdt'])} USDT</td>
+                                <td>{operator}</td>
+                            </tr>"""
+            category_section += """
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+"""
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -4257,6 +4284,7 @@ def generate_beautiful_bill_html(stats: Dict, records: List[Dict], title: str = 
 </html>"""
 
     return html
+
 
 async def handle_view_current_bill(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理「查看当前账单」按钮回调，生成 HTML 文件并发送"""
