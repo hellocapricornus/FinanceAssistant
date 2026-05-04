@@ -305,17 +305,12 @@ def format_fee_info(fee_rate: float, exchange_rate: float) -> str:
 def generate_export_html(records: List[Dict], group_name: str, start_date: str, end_date: str) -> str:
     """生成导出账单的 HTML"""
 
-    # 🔥 获取该日期范围内的单笔费用（从第一条入款记录中获取，或者从会话中获取）
     per_transaction_fee = 0
     for r in records:
         if r['type'] == 'income':
-            # 尝试从记录中获取 fee_rate 作为手续费，但单笔费用需要单独获取
-            # 由于单笔费用没有保存在每条记录中，我们使用全局变量或者从第一条记录推断
-            pass
-
-    # 尝试从 accounting_manager 获取当前群组的单笔费用
-    # 注意：这里需要传入 group_id，但 generate_export_html 没有 group_id 参数
-    # 所以我们需要修改函数签名，或者从 records 中获取
+            if r.get('per_transaction_fee', 0) != 0:
+                per_transaction_fee = r.get('per_transaction_fee', 0)
+            break
 
     # 按日期分组
     records_by_date = {}
@@ -338,7 +333,7 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
     total_expense_usdt = sum(r['amount_usdt'] for r in records if r['type'] == 'expense')
     total_pending = total_income_usdt - total_expense_usdt
 
-    # 🔥 获取费率、汇率和单笔费用（从第一条入款记录中获取）
+    # 获取费率、汇率和单笔费用
     fee_rate = 0
     exchange_rate = 1
     per_transaction_fee = 0
@@ -348,12 +343,168 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
                 fee_rate = r.get('fee_rate', 0)
             if r.get('rate', 0) != 0:
                 exchange_rate = r.get('rate', 1)
-            # 单笔费用需要从其他地方获取，这里先设为0
-            # 如果记录中有 per_transaction_fee 字段，可以读取
             if r.get('per_transaction_fee', 0) != 0:
                 per_transaction_fee = r.get('per_transaction_fee', 0)
             if fee_rate != 0 and exchange_rate != 1:
                 break
+
+    def get_flag(cat):
+        if not cat:
+            return ''
+        cat_lower = cat.lower().strip()
+        if cat_lower in COUNTRY_FLAGS:
+            return COUNTRY_FLAGS[cat_lower]
+        for country, flag in COUNTRY_FLAGS.items():
+            if country in cat_lower or cat_lower in country:
+                return flag
+        return ''
+
+    def fmt(num, decimals=2):
+        if num == int(num):
+            return str(int(num))
+        return f"{num:.{decimals}f}"
+
+    # ========== 按操作人分组 ==========
+    operator_income = {}
+    for r in records:
+        if r['type'] == 'income':
+            operator = r.get('display_name', r.get('username', '未知'))
+            user_id = r.get('user_id', 0)
+            key = f"op_{user_id}_{hash(operator) % 10000}"
+            if key not in operator_income:
+                operator_income[key] = {
+                    'name': operator,
+                    'records': [],
+                    'total_cny': 0.0,
+                    'total_usdt': 0.0,
+                }
+            operator_income[key]['records'].append(r)
+            operator_income[key]['total_cny'] += r['amount']
+            operator_income[key]['total_usdt'] += r['amount_usdt']
+
+    operator_expense = {}
+    for r in records:
+        if r['type'] == 'expense':
+            operator = r.get('display_name', r.get('username', '未知'))
+            user_id = r.get('user_id', 0)
+            key = f"op_{user_id}_{hash(operator) % 10000}"
+            if key not in operator_expense:
+                operator_expense[key] = {
+                    'name': operator,
+                    'records': [],
+                    'total_usdt': 0.0,
+                }
+            operator_expense[key]['records'].append(r)
+            operator_expense[key]['total_usdt'] += r['amount_usdt']
+
+        # ========== 生成每个操作人的可折叠记录（按日期分组） ==========
+        operator_sections = ""
+        all_operator_keys = set(list(operator_income.keys()) + list(operator_expense.keys()))
+
+        if all_operator_keys:
+            for idx, key in enumerate(sorted(all_operator_keys, key=lambda k: operator_income.get(k, {}).get('total_cny', 0), reverse=True)):
+                safe_key = key.replace('.', '_').replace('-', '_')
+                op_income = operator_income.get(key, {})
+                op_expense = operator_expense.get(key, {})
+
+                name = op_income.get('name') or op_expense.get('name', '未知')
+                income_count = len(op_income.get('records', []))
+                income_cny = op_income.get('total_cny', 0)
+                income_usdt = op_income.get('total_usdt', 0)
+                expense_count = len(op_expense.get('records', []))
+                expense_usdt = op_expense.get('total_usdt', 0)
+
+                # ✅ 按日期分组
+                op_income_by_date = {}
+                for r in op_income.get('records', []):
+                    date = r.get('date', '未知日期')
+                    if date not in op_income_by_date:
+                        op_income_by_date[date] = []
+                    op_income_by_date[date].append(r)
+
+                op_expense_by_date = {}
+                for r in op_expense.get('records', []):
+                    date = r.get('date', '未知日期')
+                    if date not in op_expense_by_date:
+                        op_expense_by_date[date] = []
+                    op_expense_by_date[date].append(r)
+
+                operator_sections += f'''
+            <div class="date-group operator-group">
+                <div class="date-header" onclick="toggleSection(this)">
+                    <span>👤 {name} · 入款{income_count}笔 {fmt(income_cny)}元 ≈ {fmt(income_usdt)}USDT · 出款{expense_count}笔 {fmt(expense_usdt)}USDT</span>
+                    <span class="toggle-icon">▼</span>
+                </div>
+                <div class="date-content">
+    '''
+
+                # ✅ 按日期显示入款
+                for date, date_records in sorted(op_income_by_date.items()):
+                    date_cny = sum(r['amount'] for r in date_records)
+                    date_usdt = sum(r['amount_usdt'] for r in date_records)
+                    operator_sections += f'''
+                    <div class="section-title">📈 {date} · 入款{len(date_records)}笔 · {fmt(date_cny)}元 ≈ {fmt(date_usdt)}USDT</div>
+                    <table>
+                        <thead>
+                            <tr><th>时间</th><th>金额(元)</th><th>手续费</th><th>汇率</th><th>单笔费用</th><th>USDT</th><th>分类</th></tr>
+                        </thead>
+                        <tbody>
+    '''
+                    for r in date_records:
+                        dt = beijing_time(r['created_at'])
+                        time_str = dt.strftime('%H:%M')
+                        cat = r.get('category', '') or ''
+                        flag = get_flag(cat)
+                        cat_display = f"{flag} {cat}" if flag else (cat or '无')
+                        fr = r.get('fee_rate', 0)
+                        rate = r.get('rate', 0)
+                        per_fee = r.get('per_transaction_fee', 0)
+                        fee_display = f"{fmt(fr)}%" if fr == int(fr) else f"{fr}%"
+                        rate_display = fmt(rate) if rate == int(rate) else f"{rate:.2f}"
+                        per_fee_display = f"{fmt(per_fee)}元" if per_fee > 0 else "-"
+                        operator_sections += f'''
+                            <tr>
+                                <td class="record-time">{time_str}</td>
+                                <td class="record-amount income">+{fmt(r['amount'])}</td>
+                                <td class="record-fee">{fee_display}</td>
+                                <td>{rate_display}</td>
+                                <td>{per_fee_display}</td>
+                                <td>{fmt(r['amount_usdt'])}</td>
+                                <td>{cat_display}</td>
+                            </tr>'''
+                    operator_sections += '''
+                        </tbody>
+                    </table>
+    '''
+
+                # ✅ 按日期显示出款
+                for date, date_records in sorted(op_expense_by_date.items()):
+                    date_usdt = sum(r['amount_usdt'] for r in date_records)
+                    operator_sections += f'''
+                    <div class="section-title expense">📉 {date} · 出款{len(date_records)}笔 · {fmt(date_usdt)}USDT</div>
+                    <table>
+                        <thead>
+                            <tr><th>时间</th><th>金额(USDT)</th></tr>
+                        </thead>
+                        <tbody>
+    '''
+                    for r in date_records:
+                        dt = beijing_time(r['created_at'])
+                        time_str = dt.strftime('%H:%M')
+                        operator_sections += f'''
+                            <tr>
+                                <td class="record-time">{time_str}</td>
+                                <td class="record-amount" style="color:#ef4444;">-{fmt(r['amount_usdt'])}</td>
+                            </tr>'''
+                    operator_sections += '''
+                        </tbody>
+                    </table>
+    '''
+
+                operator_sections += '''
+                </div>
+            </div>
+    '''
 
     # 生成 HTML
     html = f'''<!DOCTYPE html>
@@ -363,200 +514,82 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>账单导出 - {group_name}</title>
     <style>
-        * {{
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }}
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            padding: 20px;
+            min-height: 100vh; padding: 20px;
         }}
-        .container {{
-            max-width: 1200px;
-            margin: 0 auto;
-        }}
+        .container {{ max-width: 1200px; margin: 0 auto; }}
         .header {{
-            background: white;
-            border-radius: 16px;
-            padding: 24px 32px;
-            margin-bottom: 24px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+            background: white; border-radius: 16px; padding: 24px 32px;
+            margin-bottom: 24px; box-shadow: 0 10px 40px rgba(0,0,0,0.1);
         }}
-        .header h1 {{
-            color: #333;
-            font-size: 28px;
-            margin-bottom: 8px;
-        }}
-        .header .subtitle {{
-            color: #666;
-            font-size: 14px;
-        }}
+        .header h1 {{ color: #333; font-size: 28px; margin-bottom: 8px; }}
+        .header .subtitle {{ color: #666; font-size: 14px; }}
         .summary {{
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 16px;
-            margin-bottom: 24px;
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px; margin-bottom: 24px;
         }}
         .summary-card {{
-            background: white;
-            border-radius: 12px;
-            padding: 20px;
-            text-align: center;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            background: white; border-radius: 12px; padding: 20px;
+            text-align: center; box-shadow: 0 4px 15px rgba(0,0,0,0.1);
         }}
-        .summary-card.income {{
-            border-bottom: 4px solid #10b981;
-        }}
-        .summary-card.expense {{
-            border-bottom: 4px solid #ef4444;
-        }}
-        .summary-card.pending {{
-            border-bottom: 4px solid #f59e0b;
-        }}
-        .summary-card .label {{
-            font-size: 14px;
-            color: #666;
-            margin-bottom: 8px;
-        }}
-        .summary-card .value {{
-            font-size: 28px;
-            font-weight: bold;
-        }}
+        .summary-card.income {{ border-bottom: 4px solid #10b981; }}
+        .summary-card.expense {{ border-bottom: 4px solid #ef4444; }}
+        .summary-card.pending {{ border-bottom: 4px solid #f59e0b; }}
+        .summary-card .label {{ font-size: 14px; color: #666; margin-bottom: 8px; }}
+        .summary-card .value {{ font-size: 28px; font-weight: bold; }}
         .summary-card.income .value {{ color: #10b981; }}
         .summary-card.expense .value {{ color: #ef4444; }}
         .summary-card.pending .value {{ color: #f59e0b; }}
-        /* 🔥 新增配置信息卡片样式 */
         .config-card {{
-            background: white;
-            border-radius: 12px;
-            padding: 16px 20px;
-            margin-bottom: 24px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
-            display: flex;
-            justify-content: space-around;
-            flex-wrap: wrap;
-            gap: 16px;
+            background: white; border-radius: 12px; padding: 16px 20px;
+            margin-bottom: 24px; box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            display: flex; justify-content: space-around; flex-wrap: wrap; gap: 16px;
         }}
-        .config-item {{
-            text-align: center;
-        }}
-        .config-item .label {{
-            font-size: 12px;
-            color: #666;
-            margin-bottom: 4px;
-        }}
-        .config-item .value {{
-            font-size: 18px;
-            font-weight: 600;
-            color: #333;
-        }}
+        .config-item {{ text-align: center; }}
+        .config-item .label {{ font-size: 12px; color: #666; margin-bottom: 4px; }}
+        .config-item .value {{ font-size: 18px; font-weight: 600; color: #333; }}
         .date-group {{
-            background: white;
-            border-radius: 12px;
-            margin-bottom: 20px;
-            overflow: hidden;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            background: white; border-radius: 12px; margin-bottom: 20px;
+            overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }}
+        .operator-group {{
+            border-left: 4px solid #f59e0b;
         }}
         .date-header {{
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 12px 20px;
-            font-size: 18px;
-            font-weight: bold;
-            cursor: pointer;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
+            color: white; padding: 12px 20px; font-size: 18px; font-weight: bold;
+            cursor: pointer; display: flex; justify-content: space-between; align-items: center;
         }}
-        .date-header:hover {{
-            opacity: 0.95;
-        }}
-        .date-header .toggle-icon {{
-            transition: transform 0.3s;
-        }}
-        .date-header.collapsed .toggle-icon {{
-            transform: rotate(-90deg);
-        }}
-        .date-content {{
-            padding: 20px;
-            transition: all 0.3s;
-        }}
-        .date-content.collapsed {{
-            display: none;
-        }}
+        .date-header:hover {{ opacity: 0.95; }}
+        .date-header .toggle-icon {{ transition: transform 0.3s; }}
+        .date-header.collapsed .toggle-icon {{ transform: rotate(-90deg); }}
+        .date-content {{ padding: 20px; }}
+        .date-content.collapsed {{ display: none; }}
         .section-title {{
-            font-size: 16px;
-            font-weight: 600;
-            margin: 16px 0 12px 0;
-            padding-left: 8px;
-            border-left: 4px solid #10b981;
+            font-size: 16px; font-weight: 600; margin: 16px 0 12px 0;
+            padding-left: 8px; border-left: 4px solid #10b981;
         }}
-        .section-title.expense {{
-            border-left-color: #ef4444;
-        }}
-        table {{
-            width: 100%;
-            border-collapse: collapse;
-            margin-bottom: 16px;
-        }}
-        th, td {{
-            padding: 10px 12px;
-            text-align: left;
-            border-bottom: 1px solid #e5e7eb;
-        }}
-        th {{
-            background: #f9fafb;
-            font-weight: 600;
-            color: #374151;
-            font-size: 13px;
-        }}
-        td {{
-            font-size: 14px;
-        }}
-        .record-time {{
-            color: #6b7280;
-            font-family: monospace;
-            font-size: 12px;
-        }}
-        .record-amount {{
-            font-weight: 600;
-        }}
-        .record-amount.income {{
-            color: #10b981;
-        }}
-        .record-fee {{
-            color: #8b5cf6;
-            font-family: monospace;
-            font-size: 12px;
-        }}
+        .section-title.expense {{ border-left-color: #ef4444; }}
+        table {{ width: 100%; border-collapse: collapse; margin-bottom: 16px; }}
+        th, td {{ padding: 10px 12px; text-align: left; border-bottom: 1px solid #e5e7eb; }}
+        th {{ background: #f9fafb; font-weight: 600; color: #374151; font-size: 13px; }}
+        td {{ font-size: 14px; }}
+        .record-time {{ color: #6b7280; font-family: monospace; font-size: 12px; }}
+        .record-amount {{ font-weight: 600; }}
+        .record-amount.income {{ color: #10b981; }}
+        .record-fee {{ color: #8b5cf6; font-family: monospace; font-size: 12px; }}
         .subtotal {{
-            text-align: right;
-            padding: 8px 12px;
-            background: #f9fafb;
-            border-radius: 8px;
-            font-size: 14px;
-            font-weight: 500;
+            text-align: right; padding: 8px 12px; background: #f9fafb;
+            border-radius: 8px; font-size: 14px; font-weight: 500;
         }}
-        .footer {{
-            text-align: center;
-            padding: 24px;
-            color: rgba(255,255,255,0.8);
-            font-size: 12px;
-        }}
+        .footer {{ text-align: center; padding: 24px; color: rgba(255,255,255,0.8); font-size: 12px; }}
         @media (max-width: 768px) {{
-            .summary-card .value {{
-                font-size: 20px;
-            }}
-            th, td {{
-                padding: 6px 8px;
-                font-size: 12px;
-            }}
-            .config-item .value {{
-                font-size: 14px;
-            }}
+            .summary-card .value {{ font-size: 20px; }}
+            th, td {{ padding: 6px 8px; font-size: 12px; }}
+            .config-item .value {{ font-size: 14px; }}
         }}
     </style>
 </head>
@@ -567,7 +600,6 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
             <div class="subtitle">日期范围：{start_date} 至 {end_date} | 生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>
         </div>
 
-        <!-- 🔥 新增配置信息卡片 -->
         <div class="config-card">
             <div class="config-item">
                 <div class="label">💰 手续费率</div>
@@ -600,7 +632,7 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
         </div>
 '''
 
-    # 按日期显示详细账单（这部分保持不变）
+    # 按日期显示详细账单
     for date, data in sorted(records_by_date.items()):
         date_obj = datetime.strptime(date, '%Y-%m-%d')
         date_display = date_obj.strftime('%Y年%m月%d日')
@@ -612,66 +644,42 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
 
         html += f'''
         <div class="date-group">
-            <div class="date-header" onclick="toggleDate(this)">
+            <div class="date-header" onclick="toggleSection(this)">
                 <span>📅 {date_display} ({income_count}笔入款 / {expense_count}笔出款)</span>
                 <span class="toggle-icon">▼</span>
             </div>
             <div class="date-content">
 '''
 
-        # 入款记录
         if data['income']:
             html += f'''
                 <div class="section-title">📈 入款记录</div>
                 <table>
                     <thead>
-                        <tr><th>时间</th><th>金额(元)</th><th>手续费</th><th>汇率</th><th>单笔费用</th><th>USDT</th><th>分类</th><th>操作人</th></tr>
+                        <tr><th>日期时间</th><th>金额(元)</th><th>手续费</th><th>汇率</th><th>单笔费用</th><th>USDT</th><th>分类</th><th>操作人</th></tr>
                     </thead>
                     <tbody>
 '''
             for r in data['income']:
                 dt = beijing_time(r['created_at'])
                 time_str = dt.strftime('%m-%d %H:%M')
-
-                # 获取费率和汇率
-                fee_rate = r.get('fee_rate', 0)
-                rate = r.get('rate', 0)
-
-                # 🔥 获取单笔费用（从记录中获取）
+                fee_rate_r = r.get('fee_rate', 0)
+                rate_r = r.get('rate', 0)
                 per_fee = r.get('per_transaction_fee', 0)
-
-                # 直接显示费率数字，不使用上标
-                if fee_rate == int(fee_rate):
-                    fee_display = int(fee_rate)
-                else:
-                    fee_display = fee_rate
-
-                # 格式化汇率显示
-                if rate == int(rate):
-                    rate_display = str(int(rate))
-                else:
-                    rate_display = f"{rate:.2f}"
-
-                # 格式化单笔费用显示
-                if per_fee > 0:
-                    if per_fee == int(per_fee):
-                        per_fee_display = f"{int(per_fee)}元"
-                    else:
-                        per_fee_display = f"{per_fee:.2f}元"
-                else:
-                    per_fee_display = "-"
-
+                fee_display = f"{fmt(fee_rate_r)}%" if fee_rate_r == int(fee_rate_r) else f"{fee_rate_r}%"
+                rate_display = fmt(rate_r) if rate_r == int(rate_r) else f"{rate_r:.2f}"
+                per_fee_display = f"{fmt(per_fee)}元" if per_fee > 0 else "-"
                 category = get_category_with_flag(r.get('category', '')) or '无'
                 operator = r.get('display_name', '未知')
 
                 html += f'''
                         <tr>
                             <td class="record-time">{time_str}</td>
-                            <td class="record-amount income">+{r['amount']:.2f}</td>
-                            <td class="record-fee">{fee_display}%</td>
+                            <td class="record-amount income">+{fmt(r['amount'])}</td>
+                            <td class="record-fee">{fee_display}</td>
                             <td>{rate_display}</td>
                             <td>{per_fee_display}</td>
-                            <td>{r['amount_usdt']:.2f}</td>
+                            <td>{fmt(r['amount_usdt'])}</td>
                             <td>{category}</td>
                             <td>{operator}</td>
                         </tr>
@@ -681,13 +689,12 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
                 </table>
 '''
 
-        # 出款记录
         if data['expense']:
             html += f'''
                 <div class="section-title expense">📉 出款记录</div>
                 <table>
                     <thead>
-                        <tr><th>时间</th><th>USDT</th><th>操作人</th></tr>
+                        <tr><th>日期时间</th><th>USDT</th><th>操作人</th></tr>
                     </thead>
                     <tbody>
 '''
@@ -698,7 +705,7 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
                 html += f'''
                         <tr>
                             <td class="record-time">{time_str}</td>
-                            <td class="record-amount" style="color:#ef4444;">-{r['amount_usdt']:.2f}</td>
+                            <td class="record-amount" style="color:#ef4444;">-{fmt(r['amount_usdt'])}</td>
                             <td>{operator}</td>
                         </tr>
 '''
@@ -707,7 +714,6 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
                 </table>
 '''
 
-        # 本日小计
         html += f'''
                 <div class="subtotal">
                     本日小计：入款 {income_usdt:.2f} USDT / 出款 {expense_usdt:.2f} USDT
@@ -717,16 +723,25 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
         </div>
 '''
 
+    # ========== 各操作人详细记录 ==========
+    if operator_sections:
+        html += f'''
+        <h2 style="color:white; margin: 24px 0 16px 0; font-size: 20px;">👤 各操作人详细记录</h2>
+        {operator_sections}
+'''
+
     html += f'''
         <div class="footer">
             本账单由 Telegram 记账机器人自动生成 | 共 {len(records)} 条记录
         </div>
     </div>
     <script>
-        function toggleDate(element) {{
+        function toggleSection(element) {{
             element.classList.toggle('collapsed');
-            const content = element.nextElementSibling;
-            content.classList.toggle('collapsed');
+            var content = element.nextElementSibling;
+            if (content) {{
+                content.classList.toggle('collapsed');
+            }}
         }}
     </script>
 </body>
