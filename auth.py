@@ -106,6 +106,313 @@ def init_temp_operators_from_db():
         temp_operators = {}
         return temp_operators
 
+# ========== 辅助函数（放在所有使用它们的函数之前）==========
+
+def _clear_user_configs(user_id: int):
+    """清除指定用户在所有管理员数据库中的个性化配置"""
+    for admin_id in admins.keys():
+        try:
+            conn = get_conn(admin_id)
+            c = conn.cursor()
+            c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='user_config'")
+            if c.fetchone():
+                c.execute("DELETE FROM user_config WHERE user_id = ?", (user_id,))
+                conn.commit()
+                c.execute("UPDATE user_preferences SET role = 'user' WHERE user_id = ?", (user_id,))
+                conn.commit()
+        except Exception as e:
+            print(f"清除用户 {user_id} 在管理员 {admin_id} 的配置失败: {e}")
+
+
+async def batch_add_temp_operators(user_ids: list, added_by: int, context: ContextTypes.DEFAULT_TYPE = None):
+    """批量添加临时操作人"""
+    results = {"success": [], "failed": [], "already_exists": []}
+
+    for user_id in user_ids:
+        if user_id in temp_operators or user_id in operators:
+            results["already_exists"].append(user_id)
+        else:
+            success = await add_temp_operator(user_id, added_by, context)
+            if success:
+                results["success"].append(user_id)
+            else:
+                results["failed"].append(user_id)
+
+    return results
+
+
+def batch_remove_temp_operators(user_ids: list):
+    """批量删除临时操作人"""
+    results = {"success": [], "failed": [], "not_found": []}
+
+    for user_id in user_ids:
+        if user_id not in temp_operators:
+            results["not_found"].append(user_id)
+        else:
+            success = remove_temp_operator(user_id)
+            if success:
+                results["success"].append(user_id)
+            else:
+                results["failed"].append(user_id)
+
+    return results
+
+
+# ========== 操作员管理 ==========
+
+def remove_temp_operator(user_id: int) -> bool:
+    """删除临时操作人（只有一个版本）"""
+    if user_id not in temp_operators:
+        return False
+    temp_operators.pop(user_id, None)
+    try:
+        with get_db(0) as conn:
+            c = conn.cursor()
+            c.execute("DELETE FROM temp_operators WHERE user_id = ?", (str(user_id),))
+
+        # ✅ 清除该用户在所有群组中的个性化配置
+        _clear_user_configs(user_id)
+
+        return True
+    except Exception as e:
+        print(f"❌ [DB Error] 删除临时操作员失败: {e}")
+        return False
+
+
+async def add_operator(user_id: int, context: ContextTypes.DEFAULT_TYPE = None, added_by: int = 0) -> bool:
+    if user_id in operators:
+        if added_by != 0:
+            try:
+                with get_db(added_by) as conn:
+                    now = int(time.time())
+                    conn.execute(
+                        "INSERT OR REPLACE INTO user_preferences (user_id, role, updated_at) VALUES (?, 'operator', ?)",
+                        (user_id, now)
+                    )
+                print(f"✅ 已修复操作员 {user_id} 的 role 为 operator")
+            except Exception as e:
+                print(f"❌ 修复操作员 role 失败: {e}")
+        return False
+    username = None
+    first_name = None
+    last_name = None
+    if context:
+        try:
+            user = await context.bot.get_chat(user_id)
+            username = user.username
+            first_name = user.first_name
+            last_name = user.last_name
+        except Exception as e:
+            print(f"⚠️ 无法获取用户 {user_id} 的详细信息: {e}")
+    try:
+        with get_db(0) as conn:
+            c = conn.cursor()
+            c.execute(
+                "INSERT OR REPLACE INTO operators (user_id, username, first_name, last_name, added_by) VALUES (?, ?, ?, ?, ?)",
+                (str(user_id), username, first_name, last_name, added_by)
+            )
+    except Exception as e:
+        print(f"❌ 主库添加操作员失败: {e}")
+        return False
+    operators[user_id] = {
+        "id": user_id,
+        "username": username,
+        "first_name": first_name,
+        "last_name": last_name,
+        "added_by": added_by
+    }
+    if added_by != 0:
+        try:
+            with get_db(added_by) as conn:
+                now = int(time.time())
+                conn.execute("INSERT OR REPLACE INTO user_preferences (user_id, role, updated_at) VALUES (?, 'operator', ?)", (user_id, now))
+        except Exception as e:
+            print(f"设置操作员role失败: {e}")
+    return True
+
+
+def remove_operator(user_id: int) -> bool:
+    """删除正式操作人"""
+    if user_id not in operators:
+        return False
+    try:
+        with get_db(0) as conn:
+            c = conn.cursor()
+            c.execute("DELETE FROM operators WHERE user_id = ?", (str(user_id),))
+        operators.pop(user_id, None)
+
+        # ✅ 清除该用户在所有群组中的个性化配置
+        _clear_user_configs(user_id)
+
+        return True
+    except Exception as e:
+        print(f"❌ 主库删除操作员失败: {e}")
+        return False
+
+
+def list_operators(added_by: int = None) -> Dict[int, dict]:
+    """返回操作员字典，可指定 added_by 过滤"""
+    if added_by is None:
+        return operators
+    return {uid: info for uid, info in operators.items() if info.get("added_by") == added_by}
+
+
+def get_operator_info(user_id: int) -> Optional[dict]:
+    return operators.get(user_id)
+
+
+def get_operators_list_text(user_id: int = None) -> str:
+    """生成格式化的操作员列表文本"""
+    text = "📋 **操作人列表**\n" + "━" * 20 + "\n\n"
+    admin_id = get_user_admin_id(user_id) if user_id else 0
+    if user_id == OWNER_ID:
+        if admins:
+            text += "👑 **管理员**\n"
+            for aid, info in admins.items():
+                text += f"  🆔 ID: `{aid}`\n"
+            text += "\n"
+    text += "👤 **正式操作人**\n"
+    if user_id == OWNER_ID or admin_id == 0:
+        filtered_ops = operators
+    else:
+        filtered_ops = {uid: info for uid, info in operators.items() if info.get("added_by") == admin_id}
+    if filtered_ops:
+        for uid, info in filtered_ops.items():
+            display_name = info.get('first_name', '')
+            username = info.get('username', '')
+            if username:
+                display_name = f"{display_name} (@{username})" if display_name else f"@{username}"
+            else:
+                display_name = display_name or f"用户{uid}"
+            text += f"  👤 {display_name}\n     🆔 ID: `{uid}`\n"
+    else:
+        text += "  📭 暂无正式操作人\n"
+    text += "\n" + "━" * 20 + "\n\n"
+    text += "👥 **临时操作人**（仅记账权限）\n"
+    if user_id == OWNER_ID or admin_id == 0:
+        filtered_temps = temp_operators
+    else:
+        filtered_temps = {uid: info for uid, info in temp_operators.items() if info.get("added_by") == admin_id}
+    if filtered_temps:
+        for uid, info in filtered_temps.items():
+            display_name = info.get('first_name', '')
+            username = info.get('username', '')
+            if username:
+                display_name = f"{display_name} (@{username})" if display_name else f"@{username}"
+            else:
+                display_name = display_name or f"用户{uid}"
+            text += f"  👤 {display_name}\n     🆔 ID: `{uid}`\n"
+    else:
+        text += "  📭 暂无临时操作人\n"
+    return text
+
+
+async def add_temp_operator(user_id: int, added_by: int, context: ContextTypes.DEFAULT_TYPE = None) -> bool:
+    if user_id in temp_operators or user_id in operators:
+        return False
+    username = None
+    first_name = None
+    last_name = None
+    if context:
+        try:
+            user = await context.bot.get_chat(user_id)
+            username = user.username
+            first_name = user.first_name
+            last_name = user.last_name
+        except Exception as e:
+            print(f"⚠️ 无法获取用户 {user_id} 的详细信息: {e}")
+    temp_operators[user_id] = {
+        "id": user_id,
+        "username": username,
+        "first_name": first_name,
+        "last_name": last_name,
+        "added_by": added_by
+    }
+    try:
+        with get_db(0) as conn:
+            c = conn.cursor()
+            c.execute(
+                "INSERT OR REPLACE INTO temp_operators (user_id, username, first_name, last_name, added_at, added_by) VALUES (?, ?, ?, ?, ?, ?)",
+                (str(user_id), username, first_name, last_name, int(time.time()), added_by)
+            )
+        if added_by != 0:
+            try:
+                with get_db(added_by) as conn:
+                    now = int(time.time())
+                    conn.execute(
+                        "INSERT OR REPLACE INTO user_preferences (user_id, role, updated_at) VALUES (?, 'temp', ?)",
+                        (user_id, now)
+                    )
+            except Exception as e:
+                print(f"设置临时操作员role失败: {e}")
+        return True
+    except Exception as e:
+        print(f"❌ [DB Error] 保存临时操作员失败: {e}")
+        temp_operators.pop(user_id, None)
+        return False
+
+
+def get_temp_operators_list_text() -> str:
+    if not temp_operators:
+        return "📭 当前没有临时操作人"
+    text = "👥 临时操作人列表：\n" + "━" * 20 + "\n"
+    for user_id, info in temp_operators.items():
+        display_name = info.get('first_name', '')
+        username = info.get('username', '')
+        if username:
+            display_name = f"{display_name} (@{username})" if display_name else f"@{username}"
+        else:
+            display_name = display_name or f"用户{user_id}"
+        text += f"👤 {display_name}\n🆔 ID: `{user_id}`\n" + "━" * 20 + "\n"
+    return text
+
+
+async def update_all_operators_info(context: ContextTypes.DEFAULT_TYPE, admin_id: int):
+    my_operators = {uid: info for uid, info in operators.items() if info.get("added_by") == admin_id}
+    if not my_operators:
+        return 0
+    updated_count = 0
+    failed_count = 0
+    print(f"🔄 开始更新 {len(my_operators)} 个操作员的信息...")
+    for user_id in list(my_operators.keys()):
+        try:
+            user = await context.bot.get_chat(user_id)
+            operators[user_id] = {
+                "id": user_id,
+                "username": user.username,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+                "added_by": admin_id
+            }
+            with get_db(0) as conn:
+                c = conn.cursor()
+                c.execute(
+                    "INSERT OR REPLACE INTO operators (user_id, username, first_name, last_name, added_by) VALUES (?, ?, ?, ?, ?)",
+                    (str(user_id), user.username, user.first_name, user.last_name, admin_id)
+                )
+            updated_count += 1
+            print(f"✅ 已更新: {user.first_name} (@{user.username}) - ID: {user_id}")
+        except Exception as e:
+            failed_count += 1
+            print(f"❌ 更新失败 ID {user_id}: {e}")
+    print(f"📊 更新完成！成功: {updated_count}, 失败: {failed_count}")
+    return updated_count
+
+
+async def cmd_update_operator_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    admin_id = get_user_admin_id(user_id)
+    if admin_id == 0:
+        await update.message.reply_text("❌ 您不是任何管理员，无法使用此命令")
+        return
+    await update.message.reply_text("🔄 正在更新操作人信息，请稍候...")
+    count = await update_all_operators_info(context, admin_id)
+    if count > 0:
+        await update.message.reply_text(f"✅ 已成功更新 {count} 个操作人的信息")
+        text = get_operators_list_text(user_id)
+        await update.message.reply_text(text, parse_mode="Markdown")
+    else:
+        await update.message.reply_text("⚠️ 没有操作人被更新，或更新失败")
 
 def init_auth():
     with get_db(0) as conn:
@@ -231,16 +538,20 @@ def remove_admin(admin_id: int) -> bool:
             c.execute("DELETE FROM operators WHERE added_by = ?", (admin_id,))
             c.execute("DELETE FROM temp_operators WHERE added_by = ?", (admin_id,))
 
-        # ✅ 标记为删除，而不是从内存中移除
         admins[admin_id]["deleted_at"] = now
 
         to_remove = [uid for uid, info in operators.items() if info.get("added_by") == admin_id]
         for uid in to_remove:
             operators.pop(uid, None)
+            _clear_user_configs(uid)  # ✅ 清除被删除操作员的个性化配置
 
         to_remove_temp = [uid for uid, info in temp_operators.items() if info.get("added_by") == admin_id]
         for uid in to_remove_temp:
             temp_operators.pop(uid, None)
+            _clear_user_configs(uid)  # ✅ 清除被删除临时操作员的个性化配置
+
+        # ✅ 也清除被删除管理员的个性化配置
+        _clear_user_configs(admin_id)
 
         print(f"✅ 已标记管理员 {admin_id} 为删除，7天后彻底清理")
         print(f"✅ 已清除该管理员下的 {len(to_remove)} 名操作员和 {len(to_remove_temp)} 名临时操作员")
@@ -248,253 +559,6 @@ def remove_admin(admin_id: int) -> bool:
     except Exception as e:
         print(f"❌ 移除管理员失败: {e}")
         return False
-
-
-# 操作员管理
-async def add_operator(user_id: int, context: ContextTypes.DEFAULT_TYPE = None, added_by: int = 0) -> bool:
-    if user_id in operators:
-        if added_by != 0:
-            try:
-                with get_db(added_by) as conn:
-                    now = int(time.time())
-                    conn.execute(
-                        "INSERT OR REPLACE INTO user_preferences (user_id, role, updated_at) VALUES (?, 'operator', ?)",
-                        (user_id, now)
-                    )
-                print(f"✅ 已修复操作员 {user_id} 的 role 为 operator")
-            except Exception as e:
-                print(f"❌ 修复操作员 role 失败: {e}")
-        return False
-    username = None
-    first_name = None
-    last_name = None
-    if context:
-        try:
-            user = await context.bot.get_chat(user_id)
-            username = user.username
-            first_name = user.first_name
-            last_name = user.last_name
-        except Exception as e:
-            print(f"⚠️ 无法获取用户 {user_id} 的详细信息: {e}")
-    try:
-        with get_db(0) as conn:
-            c = conn.cursor()
-            c.execute(
-                "INSERT OR REPLACE INTO operators (user_id, username, first_name, last_name, added_by) VALUES (?, ?, ?, ?, ?)",
-                (str(user_id), username, first_name, last_name, added_by)
-            )
-    except Exception as e:
-        print(f"❌ 主库添加操作员失败: {e}")
-        return False
-    operators[user_id] = {
-        "id": user_id,
-        "username": username,
-        "first_name": first_name,
-        "last_name": last_name,
-        "added_by": added_by
-    }
-    if added_by != 0:
-        try:
-            with get_db(added_by) as conn:
-                now = int(time.time())
-                conn.execute("INSERT OR REPLACE INTO user_preferences (user_id, role, updated_at) VALUES (?, 'operator', ?)", (user_id, now))
-        except Exception as e:
-            print(f"设置操作员role失败: {e}")
-    return True
-
-
-def remove_operator(user_id: int) -> bool:
-    if user_id not in operators:
-        return False
-    try:
-        with get_db(0) as conn:
-            c = conn.cursor()
-            c.execute("DELETE FROM operators WHERE user_id = ?", (str(user_id),))
-        operators.pop(user_id, None)
-        return True
-    except Exception as e:
-        print(f"❌ 主库删除操作员失败: {e}")
-        return False
-
-
-def list_operators(added_by: int = None) -> Dict[int, dict]:
-    """返回操作员字典，可指定 added_by 过滤"""
-    if added_by is None:
-        return operators
-    return {uid: info for uid, info in operators.items() if info.get("added_by") == added_by}
-
-
-def get_operator_info(user_id: int) -> Optional[dict]:
-    return operators.get(user_id)
-
-
-def get_operators_list_text(user_id: int = None) -> str:
-    """生成格式化的操作员列表文本"""
-    text = "📋 **操作人列表**\n" + "━" * 20 + "\n\n"
-    admin_id = get_user_admin_id(user_id) if user_id else 0
-    if user_id == OWNER_ID:
-        if admins:
-            text += "👑 **管理员**\n"
-            for aid, info in admins.items():
-                text += f"  🆔 ID: `{aid}`\n"
-            text += "\n"
-    text += "👤 **正式操作人**\n"
-    if user_id == OWNER_ID or admin_id == 0:
-        filtered_ops = operators
-    else:
-        filtered_ops = {uid: info for uid, info in operators.items() if info.get("added_by") == admin_id}
-    if filtered_ops:
-        for uid, info in filtered_ops.items():
-            display_name = info.get('first_name', '')
-            username = info.get('username', '')
-            if username:
-                display_name = f"{display_name} (@{username})" if display_name else f"@{username}"
-            else:
-                display_name = display_name or f"用户{uid}"
-            text += f"  👤 {display_name}\n     🆔 ID: `{uid}`\n"
-    else:
-        text += "  📭 暂无正式操作人\n"
-    text += "\n" + "━" * 20 + "\n\n"
-    text += "👥 **临时操作人**（仅记账权限）\n"
-    if user_id == OWNER_ID or admin_id == 0:
-        filtered_temps = temp_operators
-    else:
-        filtered_temps = {uid: info for uid, info in temp_operators.items() if info.get("added_by") == admin_id}
-    if filtered_temps:
-        for uid, info in filtered_temps.items():
-            display_name = info.get('first_name', '')
-            username = info.get('username', '')
-            if username:
-                display_name = f"{display_name} (@{username})" if display_name else f"@{username}"
-            else:
-                display_name = display_name or f"用户{uid}"
-            text += f"  👤 {display_name}\n     🆔 ID: `{uid}`\n"
-    else:
-        text += "  📭 暂无临时操作人\n"
-    return text
-
-
-async def add_temp_operator(user_id: int, added_by: int, context: ContextTypes.DEFAULT_TYPE = None) -> bool:
-    if user_id in temp_operators or user_id in operators:
-        return False
-    username = None
-    first_name = None
-    last_name = None
-    if context:
-        try:
-            user = await context.bot.get_chat(user_id)
-            username = user.username
-            first_name = user.first_name
-            last_name = user.last_name
-        except Exception as e:
-            print(f"⚠️ 无法获取用户 {user_id} 的详细信息: {e}")
-    temp_operators[user_id] = {
-        "id": user_id,
-        "username": username,
-        "first_name": first_name,
-        "last_name": last_name,
-        "added_by": added_by
-    }
-    try:
-        with get_db(0) as conn:
-            c = conn.cursor()
-            c.execute(
-                "INSERT OR REPLACE INTO temp_operators (user_id, username, first_name, last_name, added_at, added_by) VALUES (?, ?, ?, ?, ?, ?)",
-                (str(user_id), username, first_name, last_name, int(time.time()), added_by)
-            )
-        if added_by != 0:
-            try:
-                with get_db(added_by) as conn:
-                    now = int(time.time())
-                    conn.execute(
-                        "INSERT OR REPLACE INTO user_preferences (user_id, role, updated_at) VALUES (?, 'temp', ?)",
-                        (user_id, now)
-                    )
-            except Exception as e:
-                print(f"设置临时操作员role失败: {e}")
-        return True
-    except Exception as e:
-        print(f"❌ [DB Error] 保存临时操作员失败: {e}")
-        temp_operators.pop(user_id, None)
-        return False
-
-
-def remove_temp_operator(user_id: int) -> bool:
-    if user_id not in temp_operators:
-        return False
-    temp_operators.pop(user_id, None)
-    try:
-        with get_db(0) as conn:
-            c = conn.cursor()
-            c.execute("DELETE FROM temp_operators WHERE user_id = ?", (str(user_id),))
-        return True
-    except Exception as e:
-        print(f"❌ [DB Error] 删除临时操作员失败: {e}")
-        return False
-
-
-def get_temp_operators_list_text() -> str:
-    if not temp_operators:
-        return "📭 当前没有临时操作人"
-    text = "👥 临时操作人列表：\n" + "━" * 20 + "\n"
-    for user_id, info in temp_operators.items():
-        display_name = info.get('first_name', '')
-        username = info.get('username', '')
-        if username:
-            display_name = f"{display_name} (@{username})" if display_name else f"@{username}"
-        else:
-            display_name = display_name or f"用户{user_id}"
-        text += f"👤 {display_name}\n🆔 ID: `{user_id}`\n" + "━" * 20 + "\n"
-    return text
-
-
-async def update_all_operators_info(context: ContextTypes.DEFAULT_TYPE, admin_id: int):
-    my_operators = {uid: info for uid, info in operators.items() if info.get("added_by") == admin_id}
-    if not my_operators:
-        return 0
-    updated_count = 0
-    failed_count = 0
-    print(f"🔄 开始更新 {len(my_operators)} 个操作员的信息...")
-    for user_id in list(my_operators.keys()):
-        try:
-            user = await context.bot.get_chat(user_id)
-            operators[user_id] = {
-                "id": user_id,
-                "username": user.username,
-                "first_name": user.first_name,
-                "last_name": user.last_name,
-                "added_by": admin_id
-            }
-            with get_db(0) as conn:
-                c = conn.cursor()
-                c.execute(
-                    "INSERT OR REPLACE INTO operators (user_id, username, first_name, last_name, added_by) VALUES (?, ?, ?, ?, ?)",
-                    (str(user_id), user.username, user.first_name, user.last_name, admin_id)
-                )
-            updated_count += 1
-            print(f"✅ 已更新: {user.first_name} (@{user.username}) - ID: {user_id}")
-        except Exception as e:
-            failed_count += 1
-            print(f"❌ 更新失败 ID {user_id}: {e}")
-    print(f"📊 更新完成！成功: {updated_count}, 失败: {failed_count}")
-    return updated_count
-
-
-async def cmd_update_operator_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    admin_id = get_user_admin_id(user_id)
-    if admin_id == 0:
-        await update.message.reply_text("❌ 您不是任何管理员，无法使用此命令")
-        return
-    await update.message.reply_text("🔄 正在更新操作人信息，请稍候...")
-    count = await update_all_operators_info(context, admin_id)
-    if count > 0:
-        await update.message.reply_text(f"✅ 已成功更新 {count} 个操作人的信息")
-        text = get_operators_list_text(user_id)
-        await update.message.reply_text(text, parse_mode="Markdown")
-    else:
-        await update.message.reply_text("⚠️ 没有操作人被更新，或更新失败")
-
 
 # 初始化
 init_auth()
