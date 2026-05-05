@@ -1,4 +1,4 @@
-# main.py - 适配物理隔离
+# finance_assistant.py - 适配物理隔离
 try:
     import pysqlite3
     import sys
@@ -41,7 +41,7 @@ from handlers.profile import (
     profile_toggle_notify, profile_signature_start, profile_signature_input,
     profile_contact, profile_feedback_start, profile_feedback_input,
     profile_export_data, profile_back, profile_report_toggle,
-    SET_SIGNATURE, FEEDBACK, profile_monitor_group
+    SET_SIGNATURE, FEEDBACK, profile_monitor_group, profile_trial_start, trial_confirm
 )
 from handlers.operator import add_admin_cmd, remove_admin_cmd, list_admins_cmd, get_admin_list_text
 from db_manager import close_all_connections, init_admin_db, get_conn, get_db
@@ -917,6 +917,16 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("migrate_source", None)
         context.user_data.pop("migrate_target", None)
         return
+
+    # ========== 试用功能 ==========
+    if data == "profile_trial_start":
+        from handlers.profile import profile_trial_start
+        await profile_trial_start(update, context)
+        return
+    if data == "trial_confirm":
+        from handlers.profile import trial_confirm
+        await trial_confirm(update, context)
+        return
     
     # ========== 会员系统 ==========
     if data == "subscription_menu":
@@ -1426,7 +1436,7 @@ async def cleanup_deleted_admins(app: Application):
                 c.execute("DELETE FROM admins WHERE admin_id = ?", (admin_id,))
                 c.execute("DELETE FROM operators WHERE added_by = ?", (admin_id,))
                 c.execute("DELETE FROM temp_operators WHERE added_by = ?", (admin_id,))
-                c.execute("UPDATE user_preferences SET role = 'user' WHERE user_id = ?", (admin_id,))
+                # ❌ 不要删除 trial_users 和 user_subscriptions，保留判断依据
                 # 物理删除独立数据库文件
                 import os
                 db_path = f"data/admin_{admin_id}.db"
@@ -1813,6 +1823,8 @@ def main():
             CallbackQueryHandler(profile_export_data, pattern="^profile_export$"),
             CallbackQueryHandler(profile_report_toggle, pattern="^profile_report_toggle$"),
             CallbackQueryHandler(profile_monitor_group, pattern="^profile_monitor_group$"),
+            CallbackQueryHandler(profile_trial_start, pattern="^profile_trial_start$"),
+            CallbackQueryHandler(trial_confirm, pattern="^trial_confirm$"),
         ],
         states={
             SET_SIGNATURE: [MessageHandler(filters.TEXT, profile_signature_input)],
@@ -1839,7 +1851,92 @@ def main():
         asyncio.create_task(cleanup_admin_loop(app))
         asyncio.create_task(cleanup_expired_states())
 
-        # finance_assistant.py 的 post_init 中添加
+        async def trial_expiry_check():
+            await asyncio.sleep(180)  # 启动后等3分钟
+            while True:
+                try:
+                    conn = get_conn(0)
+                    now = int(time.time())
+
+                    # 到期当天提醒
+                    expire_today = conn.execute(
+                        """SELECT user_id FROM trial_users 
+                           WHERE status = 'active' 
+                           AND expire_date > ? AND expire_date < ?""",
+                        (now, now + 86400)
+                    ).fetchall()
+
+                    for row in expire_today:
+                        try:
+                            await app.bot.send_message(
+                                chat_id=row["user_id"],
+                                text=f"⚠️ **试用即将到期**\n\n"
+                                     f"您的试用期今天结束！\n"
+                                     f"数据将保留 7 天，请及时升级会员。\n\n"
+                                     f"💡 个人中心 → 升级会员",
+                                parse_mode="Markdown"
+                            )
+                        except Exception as e:
+                            print(f"❌ 发送试用到期提醒失败 {row['user_id']}: {e}")
+
+                    # 处理已过期的试用
+                    expired = conn.execute(
+                        """SELECT user_id, expire_date FROM trial_users 
+                           WHERE status = 'active' AND expire_date < ?""",
+                        (now,)
+                    ).fetchall()
+
+                    for row in expired:
+                        conn.execute(
+                            "UPDATE trial_users SET status = 'expired' WHERE user_id = ?",
+                            (row["user_id"],)
+                        )
+                        conn.execute(
+                            "UPDATE admins SET deleted_at = ? WHERE admin_id = ? AND source = 'trial'",
+                            (now, row["user_id"])
+                        )
+                        # ✅ 新增：从 operators 表中删除
+                        conn.execute(
+                            "DELETE FROM operators WHERE user_id = ?",
+                            (str(row["user_id"]),)
+                        )
+
+                        try:
+                            await app.bot.send_message(
+                                chat_id=row["user_id"],
+                                text=f"🔔 **试用已到期**\n\n"
+                                     f"您的试用已经结束。\n"
+                                     f"数据将保留 7 天，之后自动清除。\n\n"
+                                     f"👉 升级会员保留全部数据：",
+                                parse_mode="Markdown",
+                                reply_markup=InlineKeyboardMarkup([[
+                                    InlineKeyboardButton("⭐ 升级会员", callback_data="subscription_menu")
+                                ]])
+                            )
+                        except Exception as e:
+                            print(f"❌ 发送试用到期通知失败 {row['user_id']}: {e}")
+
+                    conn.commit()
+                    # ✅ 清理内存并重新加载
+                    from auth import load_admins_from_db, operators, temp_operators
+                    load_admins_from_db()
+                    for row in expired:
+                        uid = row["user_id"]
+                        operators.pop(uid, None)
+                        # ✅ 清理该管理员下属的操作员
+                        for op_uid in list(operators.keys()):
+                            if operators[op_uid].get("added_by") == uid:
+                                operators.pop(op_uid, None)
+                        for op_uid in list(temp_operators.keys()):
+                            if temp_operators[op_uid].get("added_by") == uid:
+                                temp_operators.pop(op_uid, None)
+
+                except Exception as e:
+                    print(f"⚠️ 试用到期检查失败: {e}")
+
+                await asyncio.sleep(3600)  # 每小时检查一次
+
+        asyncio.create_task(trial_expiry_check())
 
         async def subscription_expiry_check():
             await asyncio.sleep(120)  # 启动后等2分钟
@@ -1847,6 +1944,7 @@ def main():
                 try:
                     conn = get_conn(0)
                     now = int(time.time())
+
                     # 到期前3天提醒
                     remind_start = now + 3 * 86400
                     remind_end = now + 4 * 86400  # 只提醒一次（在3-4天之间）
@@ -1898,6 +1996,64 @@ def main():
                             )
                         except Exception as e:
                             print(f"❌ 发送到期通知失败 {sub['user_id']}: {e}")
+
+                    # ✅ 新增：处理已过期的会员
+                    expired_subs = conn.execute(
+                        """SELECT u.user_id, u.expire_date, p.name 
+                           FROM user_subscriptions u 
+                           LEFT JOIN subscription_plans p ON u.plan_id = p.plan_id 
+                           WHERE u.status = 'active' AND u.expire_date < ?""",
+                        (now,)
+                    ).fetchall()
+
+                    for sub in expired_subs:
+                        # 标记会员过期
+                        conn.execute(
+                            "UPDATE user_subscriptions SET status = 'expired' WHERE user_id = ?",
+                            (sub["user_id"],)
+                        )
+                        # 标记管理员为删除
+                        conn.execute(
+                            "UPDATE admins SET deleted_at = ? WHERE admin_id = ?",
+                            (now, sub["user_id"])
+                        )
+                        # ✅ 新增：从 operators 表中删除
+                        conn.execute(
+                            "DELETE FROM operators WHERE user_id = ?",
+                            (str(sub["user_id"]),)
+                        )
+                        print(f"🔔 会员已到期，标记删除: {sub['user_id']}")
+
+                        try:
+                            await app.bot.send_message(
+                                chat_id=sub["user_id"],
+                                text=f"🔔 **会员已到期**\n\n"
+                                     f"您的会员已经到期。\n"
+                                     f"数据将保留 7 天，之后自动清除。\n\n"
+                                     f"👉 续费会员保留全部数据：",
+                                parse_mode="Markdown",
+                                reply_markup=InlineKeyboardMarkup([[
+                                    InlineKeyboardButton("💳 续费会员", callback_data="subscription_menu")
+                                ]])
+                            )
+                        except Exception as e:
+                            print(f"❌ 发送到期通知失败 {sub['user_id']}: {e}")
+
+                    conn.commit()
+                    # ✅ 清理内存并重新加载
+                    if expired_subs:
+                        from auth import load_admins_from_db, operators, temp_operators
+                        load_admins_from_db()
+                        for sub in expired_subs:
+                            uid = sub["user_id"]
+                            operators.pop(uid, None)
+                            # ✅ 清理该管理员下属的操作员
+                            for op_uid in list(operators.keys()):
+                                if operators[op_uid].get("added_by") == uid:
+                                    operators.pop(op_uid, None)
+                            for op_uid in list(temp_operators.keys()):
+                                if temp_operators[op_uid].get("added_by") == uid:
+                                    temp_operators.pop(op_uid, None)
 
                 except Exception as e:
                     print(f"⚠️ 会员到期检查失败: {e}")
