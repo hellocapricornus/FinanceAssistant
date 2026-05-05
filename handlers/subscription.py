@@ -96,6 +96,8 @@ def activate_subscription(user_id: int, plan_id: int, duration_days: int):
     """开通/续费会员"""
     now = int(time.time())
     with get_db(0) as conn:
+        # 清除试用状态
+        conn.execute("UPDATE trial_users SET status = 'expired' WHERE user_id = ?", (user_id,))
         # 检查是否已有会员记录
         existing = conn.execute("SELECT * FROM user_subscriptions WHERE user_id = ?", (user_id,)).fetchone()
 
@@ -363,12 +365,11 @@ async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """用户点击"我已支付"，手动检查"""
     query = update.callback_query
     user_id = query.from_user.id
-
     order_id = query.data.replace("sub_check_", "")
+    
     logger.info(f"check_payment: 开始检测订单 {order_id}")
 
     order = get_order(order_id)
-
     if not order:
         logger.info(f"check_payment: 订单 {order_id} 不存在")
         await query.answer("❌ 订单不存在", show_alert=True)
@@ -465,6 +466,14 @@ async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
             break  # ✅ 找到匹配就退出循环
 
     if found:
+        # ✅ 写入 admin_users 表存储用户信息
+        from db_manager import get_conn
+        conn = get_conn(0)
+        conn.execute(
+            "INSERT OR REPLACE INTO admin_users (user_id, username, first_name, last_name) VALUES (?, ?, ?, ?)",
+            (user_id, query.from_user.username or '', query.from_user.first_name or '', query.from_user.last_name or '')
+        )
+        conn.commit()
         # ✅ 支付成功，跳转到会员状态页面
         sub = get_user_subscription(user_id)
         if sub:
@@ -574,10 +583,12 @@ async def manage_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     filter_type = context.user_data.get('sub_filter', 'active')
 
     subs = get_all_subscriptions_full()
+    trials = get_all_trials()
 
     # 筛选
     if filter_type == 'active':
         subs = [s for s in subs if s['status'] in ('active', 'suspended')]
+        trials = [t for t in trials if t['status'] == 'active' and t['expire_date'] > int(time.time())]
     elif filter_type == 'expired':
         now = int(time.time())
         subs = [
@@ -586,8 +597,17 @@ async def manage_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
             and s.get('deleted_at', 0) > 0 
             and (now - s['deleted_at']) <= 7 * 86400
         ]
+        trials = [t for t in trials if t['status'] == 'expired' or (t['status'] == 'active' and t['expire_date'] <= now)]
+    elif filter_type == 'trial':
+        subs = []
+        trials = [t for t in trials]  # 显示所有试用用户
+    else:
+        # all
+        pass
 
-    filter_names = {'active': '正常会员', 'expired': '已过期会员（7天内）', 'all': '全部会员'}
+    filter_names = {'active': '正常会员', 'trial': '试用用户', 'expired': '已过期会员（7天内）', 'all': '全部会员'}
+
+    text = ""  # ✅ 提前初始化
 
     if subs:
         text = f"👥 **{filter_names.get(filter_type, '全部会员')}**（共 {len(subs)} 人）\n\n"
@@ -595,10 +615,18 @@ async def manage_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         now = int(time.time())
         for s in subs:
             expire_date = datetime.fromtimestamp(s["expire_date"], tz=BEIJING_TZ).strftime('%Y-%m-%d')
-            remaining = max(0, (s["expire_date"] - now) // 86400)
+            remaining_seconds = max(0, s["expire_date"] - now)
+            remaining_days = remaining_seconds // 86400
+            remaining_hours = (remaining_seconds % 86400) // 3600
+            remaining_minutes = (remaining_seconds % 3600) // 60
 
-            if s["status"] == "active" and remaining > 0:
-                status = f"✅ 正常（剩余 {remaining} 天）"
+            if s["status"] == "active" and remaining_seconds > 0:
+                if remaining_days > 0:
+                    status = f"✅ 正常（剩余 {remaining_days}天{remaining_hours}小时）"
+                elif remaining_hours > 0:
+                    status = f"✅ 正常（剩余 {remaining_hours}小时{remaining_minutes}分钟）"
+                else:
+                    status = f"✅ 正常（剩余 {remaining_minutes}分钟）"
             elif s["status"] == "suspended":
                 status = f"⏸️ 已停用（剩余 {remaining} 天）"
             elif s["status"] == "cancelled":
@@ -613,12 +641,43 @@ async def manage_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 status = f"❓ {s['status']}"
 
-            text += f"• 用户: `{s['user_id']}` | 套餐ID: `{s['plan_id']}` | {s.get('plan_name', '未知')}\n"
+            display_name = _get_user_display_name(s['user_id'])
+            text += f"• {display_name} (`{s['user_id']}`) | 套餐ID: `{s['plan_id']}` | {s.get('plan_name', '未知')}\n"
             text += f"   📅 到期: {expire_date} | {status}\n\n"
             if len(text) > 3500:
                 text += "... 仅显示前部分"
                 break
-    else:
+    # ✅ 显示试用用户
+    if trials:
+        if subs:
+            text += "\n" + "━" * 20 + "\n\n"
+        text += f"🎁 **试用用户**（共 {len(trials)} 人）\n\n"
+        now = int(time.time())
+        for t in trials:
+            expire_date = datetime.fromtimestamp(t["expire_date"], tz=BEIJING_TZ).strftime('%Y-%m-%d')
+            remaining_seconds = max(0, t["expire_date"] - now)
+            remaining_days = remaining_seconds // 86400
+            remaining_hours = (remaining_seconds % 86400) // 3600
+            remaining_minutes = (remaining_seconds % 3600) // 60
+
+            if t["status"] == "active" and remaining_seconds > 0:
+                if remaining_days > 0:
+                    status = f"🎁 试用中（剩余 {remaining_days}天{remaining_hours}小时）"
+                elif remaining_hours > 0:
+                    status = f"🎁 试用中（剩余 {remaining_hours}小时{remaining_minutes}分钟）"
+                else:
+                    status = f"🎁 试用中（剩余 {remaining_minutes}分钟）"
+            else:
+                status = "❌ 已过期"
+
+            display_name = _get_user_display_name(t['user_id'])
+            text += f"• {display_name} (`{t['user_id']}`) | 🎁 试用\n"
+            text += f"   📅 到期: {expire_date} | {status}\n\n"
+            if len(text) > 3500:
+                text += "... 仅显示前部分"
+                break
+
+    if not subs and not trials:
         text = f"📭 暂无{filter_names.get(filter_type, '')}用户\n\n"
 
     text += "━━━━━━━━━━━━━━━━\n"
@@ -632,6 +691,7 @@ async def manage_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     filter_buttons = []
     filter_configs = [
         ("✅ 正常", "sub_filter_active"),
+        ("🎁 试用", "sub_filter_trial"),  # ✅ 新增
         ("❌ 已过期", "sub_filter_expired"),
         ("📋 全部", "sub_filter_all"),
     ]
@@ -677,6 +737,24 @@ def get_all_subscriptions_full():
 
             result.append(sub)
 
+    return result
+
+def get_all_trials():
+    """获取所有试用用户信息"""
+    with get_db(0) as conn:
+        rows = conn.execute(
+            """SELECT t.user_id, t.start_date, t.expire_date, t.status,
+                      a.deleted_at
+               FROM trial_users t
+               LEFT JOIN admins a ON t.user_id = a.admin_id
+               ORDER BY t.expire_date DESC"""
+        ).fetchall()
+        result = []
+        for r in rows:
+            trial = dict(r)
+            if trial.get("deleted_at") is None or trial["deleted_at"] == 0:
+                trial["deleted_at"] = 0
+            result.append(trial)
     return result
 
 async def sub_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -881,8 +959,9 @@ async def manage_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         created = datetime.fromtimestamp(o["created_at"], tz=BEIJING_TZ).strftime('%m-%d %H:%M')
 
+        display_name = _get_user_display_name(o['user_id'])
         text += f"📦 `{o['order_id']}`\n"
-        text += f"   👤 用户: `{o['user_id']}` | 💰 {o['amount_usdt']} USDT\n"
+        text += f"   👤 {display_name} (`{o['user_id']}`) | 💰 {o['amount_usdt']} USDT\n"
         text += f"   📅 {created} | {status_text}\n\n"
 
     keyboard = []
@@ -940,6 +1019,26 @@ def _get_filter_name(filter_type: str) -> str:
         'expired': '已取消/过期',
     }
     return names.get(filter_type, '全部')
+
+def _get_user_display_name(user_id: int) -> str:
+    try:
+        conn = get_conn(0)
+        row = conn.execute(
+            "SELECT first_name, username FROM admin_users WHERE user_id = ? LIMIT 1",
+            (user_id,)
+        ).fetchone()
+        if row:
+            first_name = row[0] or ""
+            username = row[1] or ""
+            if username and first_name:
+                return f"{first_name} (@{username})"
+            elif username:
+                return f"@{username}"
+            elif first_name:
+                return first_name
+    except:
+        pass
+    return f"用户{user_id}"
 
 async def order_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """订单筛选"""
@@ -1037,6 +1136,15 @@ async def manual_confirm_payment(update: Update, context: ContextTypes.DEFAULT_T
     from auth import add_admin, load_admins_from_db
     add_admin(order["user_id"])
     load_admins_from_db()
+
+    # ✅ 写入 admin_users 表存储用户信息
+    from db_manager import get_conn
+    conn = get_conn(0)
+    conn.execute(
+        "INSERT OR REPLACE INTO admin_users (user_id, username, first_name, last_name) VALUES (?, ?, ?, ?)",
+        (order["user_id"], query.from_user.username or '', query.from_user.first_name or '', query.from_user.last_name or '')
+    )
+    conn.commit()
 
     await query.message.edit_text(
         f"✅ 已手动确认支付\n\n"
@@ -1364,6 +1472,34 @@ async def check_subscription_payments(app):
 
                     break
 
-    released = release_expired_orders()
-    if released > 0:
-        logger.info(f"释放了 {released} 个过期订单的地址")
+    # ✅ 处理过期订单
+    now = int(time.time())
+    expired_orders = conn.execute(
+        "SELECT order_id, user_id, amount_usdt FROM payment_orders WHERE status = 'pending' AND expire_at < ?",
+        (now,)
+    ).fetchall()
+
+    for eo in expired_orders:
+        conn.execute("UPDATE payment_orders SET status = 'expired' WHERE order_id = ?", (eo["order_id"],))
+        conn.execute("UPDATE payment_addresses SET status = 'idle' WHERE address = ?", 
+                     (conn.execute("SELECT payment_address FROM payment_orders WHERE order_id = ?", (eo["order_id"],)).fetchone()[0],))
+
+        # ✅ 发送超时通知
+        try:
+            await app.bot.send_message(
+                chat_id=eo["user_id"],
+                text=f"⏰ **订单已超时**\n\n"
+                     f"📦 订单编号：`{eo['order_id']}`\n"
+                     f"💰 金额：{eo['amount_usdt']} USDT\n\n"
+                     f"您的支付订单已超时取消。\n"
+                     f"如需继续开通会员，请重新下单。",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔄 重新下单", callback_data="subscription_menu")
+                ]])
+            )
+            logger.info(f"✅ 已发送超时通知给用户 {eo['user_id']}")
+        except Exception as e:
+            logger.error(f"❌ 发送超时通知失败 {eo['user_id']}: {e}")
+
+    conn.commit()
