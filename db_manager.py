@@ -81,7 +81,14 @@ def init_admin_db(admin_id: int):
     """
     db_path = os.path.join(DATA_DIR, f"admin_{admin_id}.db")
     if os.path.exists(db_path):
-        return
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='user_preferences'")
+        if c.fetchone():
+            conn.close()
+            return
+        conn.close()
+        os.remove(db_path)
 
     _ensure_data_dir()
     conn = sqlite3.connect(db_path)
