@@ -1,5 +1,5 @@
 # handlers/operator.py - 适配物理隔离
-
+import time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ContextTypes, ConversationHandler
 from auth import (
@@ -36,6 +36,26 @@ def list_operators(added_by: int = None) -> Dict[int, dict]:
         return operators
     return {uid: info for uid, info in operators.items() if info.get("added_by") == added_by}
 
+def _get_admin_display_name(admin_id: int) -> str:
+    try:
+        conn = get_master_conn(0)
+        row = conn.execute(
+            "SELECT first_name, username FROM admin_users WHERE user_id = ? LIMIT 1",
+            (admin_id,)
+        ).fetchone()
+        if row and (row[0] or row[1]):
+            first_name = row[0] or ""
+            username = row[1] or ""
+            if username and first_name:
+                return f"{first_name} (@{username})"
+            elif username:
+                return f"@{username}"
+            elif first_name:
+                return first_name
+    except:
+        pass
+    return f"用户{admin_id}"
+
 def get_admin_list_text() -> str:
     if not admins:
         return "📭 当前没有管理员"
@@ -44,30 +64,81 @@ def get_admin_list_text() -> str:
     filtered_admins = {aid: info for aid, info in admins.items() if aid != OWNER_ID}
     if not filtered_admins:
         return "📭 当前没有其他管理员"
+
+    now = int(time.time())
+
     for admin_id, info in filtered_admins.items():
         created_at = info.get("created_at", 0)
         if created_at:
             dt = datetime.fromtimestamp(created_at, tz=BEIJING_TZ).strftime('%Y-%m-%d %H:%M')
         else:
             dt = "未知"
-        # 获取昵称和用户名
-        display_name = f"用户{admin_id}"
-        username = ""
-        # 从该管理员的独立库 group_users 表查询用户自己的信息
-        try:
-            from db_manager import get_conn
-            conn = get_conn(admin_id)
-            row = conn.execute("SELECT first_name, username FROM group_users WHERE user_id = ? LIMIT 1", (admin_id,)).fetchone()
-            if row:
-                first_name = row[0] or ""
-                username = row[1] or ""
-                if username:
-                    display_name = f"{first_name} (@{username})" if first_name else f"@{username}"
+
+        # ✅ 检查状态
+        deleted_at = info.get("deleted_at", 0)
+        expire_date = info.get("expire_date", 0)
+        source = info.get("source", "manual")
+
+        # 判断状态
+        if deleted_at > 0:
+            # 已标记删除
+            retain_days = max(0, 7 - (now - deleted_at) // 86400)
+            if retain_days > 0:
+                status = f"🗑️ 已过期（{retain_days}天后清除）"
+            else:
+                status = "🗑️ 待清理"
+        elif expire_date > 0 and expire_date < now:
+            status = "⚠️ 已到期（待处理）"
+        else:
+            # 正常状态
+            if source == "trial":
+                if expire_date > 0:
+                    remaining_seconds = max(0, expire_date - now)
+                    remaining_days = remaining_seconds // 86400
+                    remaining_hours = (remaining_seconds % 86400) // 3600
+                    remaining_minutes = (remaining_seconds % 3600) // 60
+                    if remaining_days > 0:
+                        status = f"🎁 试用中（剩余{remaining_days}天{remaining_hours}小时）"
+                    elif remaining_hours > 0:
+                        status = f"🎁 试用中（剩余{remaining_hours}小时{remaining_minutes}分钟）"
+                    elif remaining_minutes > 0:
+                        status = f"🎁 试用中（剩余{remaining_minutes}分钟）"
+                    else:
+                        status = "🎁 试用用户"
                 else:
-                    display_name = first_name if first_name else f"用户{admin_id}"
-        except Exception:
-            pass
-        text += f"• {display_name} (ID: `{admin_id}`)  添加时间: {dt}\n"
+                    status = "🎁 试用用户"
+            elif source == "subscription":
+                if expire_date > 0:
+                    remaining_seconds = max(0, expire_date - now)
+                    remaining_days = remaining_seconds // 86400
+                    remaining_hours = (remaining_seconds % 86400) // 3600
+                    remaining_minutes = (remaining_seconds % 3600) // 60
+                    if remaining_days > 0:
+                        status = f"💳 付费会员（剩余{remaining_days}天{remaining_hours}小时）"
+                    elif remaining_hours > 0:
+                        status = f"💳 付费会员（剩余{remaining_hours}小时{remaining_minutes}分钟）"
+                    elif remaining_minutes > 0:
+                        status = f"💳 付费会员（剩余{remaining_minutes}分钟）"
+                    else:
+                        status = "💳 付费会员"
+                else:
+                    status = "💳 付费会员"
+            else:
+                status = "✅ 正常"
+
+        # 获取显示名称（原有代码）
+        display_name = _get_admin_display_name(admin_id)
+
+        text += f"• {display_name} (ID: `{admin_id}`)\n"
+        text += f"  状态：{status} | 添加时间: {dt}\n"
+
+        # ✅ 显示到期时间
+        if expire_date > 0:
+            expire_dt = datetime.fromtimestamp(expire_date, tz=BEIJING_TZ).strftime('%Y-%m-%d %H:%M')
+            text += f"  到期时间：{expire_dt}\n"
+
+        text += "\n"
+
     return text
 
 def get_operator_keyboard(user_id: int):
@@ -197,9 +268,7 @@ async def list_admins_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not admins:
         await update.message.reply_text("📭 当前没有管理员")
         return
-    text = "👑 **管理员列表**\n"
-    for admin_id in admins:
-        text += f"• ID: `{admin_id}`\n"
+    text = get_admin_list_text()
     await update.message.reply_text(text, parse_mode='Markdown')
 
 async def temp_operator_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -289,14 +358,8 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["active_module"] = "operator"
         await query.message.reply_text("请输入要移除的管理员用户ID（纯数字）：")
     elif data == "op_admin_list":
-        if not admins:
-            await query.message.reply_text("📭 当前没有管理员")
-        else:
-            text = "👑 **管理员列表**\n"
-            for admin_id in admins:
-                text += f"• ID: `{admin_id}`\n"
-            await query.message.reply_text(text, parse_mode='Markdown')
-        context.user_data.pop("active_module", None)
+        text = get_admin_list_text()
+        await query.message.reply_text(text, parse_mode='Markdown')
 
 async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
