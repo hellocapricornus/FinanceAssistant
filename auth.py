@@ -273,7 +273,7 @@ def get_operators_list_text(user_id: int = None) -> str:
             text += "\n"
     text += "👤 **正式操作人**\n"
     if user_id == OWNER_ID or admin_id == 0:
-        filtered_ops = operators
+        filtered_ops = {uid: info for uid, info in operators.items() if info.get("added_by") == user_id}
     else:
         filtered_ops = {uid: info for uid, info in operators.items() if info.get("added_by") == admin_id}
     if filtered_ops:
@@ -290,7 +290,7 @@ def get_operators_list_text(user_id: int = None) -> str:
     text += "\n" + "━" * 20 + "\n\n"
     text += "👥 **临时操作人**（仅记账权限）\n"
     if user_id == OWNER_ID or admin_id == 0:
-        filtered_temps = temp_operators
+        filtered_temps = {uid: info for uid, info in temp_operators.items() if info.get("added_by") == user_id}
     else:
         filtered_temps = {uid: info for uid, info in temp_operators.items() if info.get("added_by") == admin_id}
     if filtered_temps:
@@ -453,8 +453,17 @@ def is_authorized(user_id: int, require_full_access: bool = False) -> bool:
     if is_admin(user_id):
         return True
     if require_full_access:
-        return user_id in operators
-    return user_id in operators or user_id in temp_operators
+        return user_id in operators and _is_operator_active(user_id)  # ✅ 新增检查
+    return (user_id in operators and _is_operator_active(user_id)) or user_id in temp_operators  # ✅
+
+def _is_operator_active(user_id: int) -> bool:
+    """检查操作员所属的管理员是否仍然有效"""
+    if user_id not in operators:
+        return False
+    admin_id = operators[user_id].get("added_by", 0)
+    if admin_id == 0:
+        return True  # 没有归属的操作员，保持原有权限
+    return is_admin(admin_id)  # 管理员有效 → 操作员有效
 
 
 def get_user_admin_id(user_id: int) -> int:
