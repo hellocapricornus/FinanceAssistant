@@ -25,7 +25,7 @@ PROFILE_MAIN = 1
 SET_SIGNATURE = 2
 FEEDBACK = 3
 EXPORT_DATA = 4
-TRIAL_DURATION_DAYS = 7  # 试用天数
+TRIAL_DURATION_DAYS = 0.003  # 试用天数
 
 # 北京时区
 BEIJING_TZ = timezone(timedelta(hours=8))
@@ -208,6 +208,16 @@ async def handle_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id
     admin_id = get_user_admin_id(user_id)
     display_name = user.username or user.first_name or ""
+
+    # ✅ 自动更新 admin_users 表中的昵称
+    from db_manager import get_conn
+    conn = get_conn(0)
+    conn.execute(
+        "INSERT OR REPLACE INTO admin_users (user_id, username, first_name, last_name) VALUES (?, ?, ?, ?)",
+        (user_id, user.username or '', user.first_name or '', user.last_name or '')
+    )
+    conn.commit()
+    
     prefs = db_get_user_preferences(user_id, admin_id)
     text, markup = await _build_profile_menu(user_id, prefs, display_name, admin_id)
     if update.callback_query:
