@@ -25,7 +25,7 @@ PROFILE_MAIN = 1
 SET_SIGNATURE = 2
 FEEDBACK = 3
 EXPORT_DATA = 4
-TRIAL_DURATION_DAYS = 0.003  # 试用天数
+TRIAL_DURATION_DAYS = 14  # 试用天数
 
 # 北京时区
 BEIJING_TZ = timezone(timedelta(hours=8))
