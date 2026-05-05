@@ -318,6 +318,19 @@ def init_master_db():
             status TEXT DEFAULT 'idle',
             added_at INTEGER DEFAULT 0
         );
+
+        CREATE TABLE IF NOT EXISTS trial_users (
+            user_id INTEGER PRIMARY KEY,
+            start_date INTEGER NOT NULL,
+            expire_date INTEGER NOT NULL,
+            status TEXT DEFAULT 'active'
+        );
+        CREATE TABLE IF NOT EXISTS admin_users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT
+        );
     """)
     try:
         conn.execute("ALTER TABLE admins ADD COLUMN source TEXT DEFAULT 'manual'")
