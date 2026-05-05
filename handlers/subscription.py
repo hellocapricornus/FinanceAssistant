@@ -359,10 +359,6 @@ async def select_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return SUBSCRIPTION_CONFIRM_ORDER
 
-# handlers/subscription.py - check_payment 函数
-
-            manual_confirm_payment 
-
 async def cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """取消订单"""
     query = update.callback_query
