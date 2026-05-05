@@ -361,150 +361,7 @@ async def select_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # handlers/subscription.py - check_payment 函数
 
-async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """用户点击"我已支付"，手动检查"""
-    query = update.callback_query
-    user_id = query.from_user.id
-    order_id = query.data.replace("sub_check_", "")
-    
-    logger.info(f"check_payment: 开始检测订单 {order_id}")
-
-    order = get_order(order_id)
-    if not order:
-        logger.info(f"check_payment: 订单 {order_id} 不存在")
-        await query.answer("❌ 订单不存在", show_alert=True)
-        return
-
-    if order["status"] == "paid":
-        logger.info(f"check_payment: 订单 {order_id} 已支付")
-        # ✅ 直接跳转到会员状态页面
-        sub = get_user_subscription(user_id)
-        if sub:
-            return await show_renew_menu(update, context, sub)
-        await query.answer("✅ 支付成功！会员已开通。", show_alert=True)
-        return
-
-    if int(time.time()) > order["expire_at"]:
-        logger.info(f"check_payment: 订单 {order_id} 已超时")
-        await query.answer("⏰ 订单已超时，请重新下单。", show_alert=True)
-        with get_db(0) as conn:
-            conn.execute("UPDATE payment_addresses SET status = 'idle' WHERE address = ?", (order["payment_address"],))
-            conn.execute("UPDATE payment_orders SET status = 'expired' WHERE order_id = ?", (order_id,))
-        return
-
-    # 显示检测中
-    await query.answer("🔍 正在检测链上支付，请稍候...", show_alert=True)
-
-    from handlers.monitor import get_trc20_transactions
-    txs = await get_trc20_transactions(order["payment_address"], min_timestamp=(order["created_at"] - 300) * 1000, limit=10)
-    logger.info(f"check_payment: 查到 {len(txs)} 笔交易")
-
-    found = False
-    for tx in txs:
-        to_addr = tx.get("to", "")
-        raw_amount = tx.get("value", 0)
-        amount = int(raw_amount) / 1_000_000 if raw_amount else 0
-        tx_id = tx.get("transaction_id", "")
-
-        if to_addr == order["payment_address"] and amount >= order["amount_usdt"]:
-            logger.info(f"check_payment: 找到匹配交易 {tx_id}, 金额 {amount}")
-
-            with get_db(0) as conn:
-                now = int(time.time())
-
-                existing = conn.execute(
-                    "SELECT order_id FROM payment_orders WHERE tx_id = ? AND status = 'paid'",
-                    (tx_id,)
-                ).fetchone()
-                if existing:
-                    continue
-
-                conn.execute(
-                    "UPDATE payment_orders SET status = 'paid', tx_id = ?, paid_at = ? WHERE order_id = ?",
-                    (tx_id, now, order_id)
-                )
-
-                conn.execute("UPDATE payment_addresses SET status = 'idle' WHERE address = ?", (order["payment_address"],))
-
-                plan = conn.execute("SELECT * FROM subscription_plans WHERE plan_id = ?", (order["plan_id"],)).fetchone()
-                if plan:
-                    conn.execute(
-                        "UPDATE user_subscriptions SET status = 'active' WHERE user_id = ? AND status = 'suspended'",
-                        (order["user_id"],)
-                    )
-
-                    existing_sub = conn.execute("SELECT * FROM user_subscriptions WHERE user_id = ?", (order["user_id"],)).fetchone()
-                    if existing_sub and existing_sub["status"] == "active" and existing_sub["expire_date"] > now:
-                        new_expire = existing_sub["expire_date"] + plan["duration_days"] * 86400
-                    else:
-                        new_expire = now + plan["duration_days"] * 86400
-
-                    conn.execute(
-                        """INSERT OR REPLACE INTO user_subscriptions (user_id, plan_id, start_date, expire_date, status)
-                           VALUES (?, ?, ?, ?, 'active')""",
-                        (order["user_id"], order["plan_id"], now, new_expire)
-                    )
-
-                    conn.execute(
-                        "UPDATE admins SET source = 'subscription', expire_date = ? WHERE admin_id = ?",
-                        (new_expire, order["user_id"])
-                    )
-
-                    all_pending = conn.execute(
-                        "SELECT order_id, payment_address FROM payment_orders WHERE user_id = ? AND status = 'pending' AND order_id != ?",
-                        (order["user_id"], order_id)
-                    ).fetchall()
-                    for po in all_pending:
-                        conn.execute("UPDATE payment_addresses SET status = 'idle' WHERE address = ?", (po["payment_address"],))
-                        conn.execute("UPDATE payment_orders SET status = 'cancelled' WHERE order_id = ?", (po["order_id"],))
-
-            from auth import add_admin, load_admins_from_db
-            add_admin(order["user_id"])
-            load_admins_from_db()
-
-            found = True
-            break  # ✅ 找到匹配就退出循环
-
-    if found:
-        # ✅ 写入 admin_users 表存储用户信息
-        from db_manager import get_conn
-        conn = get_conn(0)
-        conn.execute(
-            "INSERT OR REPLACE INTO admin_users (user_id, username, first_name, last_name) VALUES (?, ?, ?, ?)",
-            (user_id, query.from_user.username or '', query.from_user.first_name or '', query.from_user.last_name or '')
-        )
-        conn.commit()
-        # ✅ 支付成功，跳转到会员状态页面
-        sub = get_user_subscription(user_id)
-        if sub:
-            await query.answer("✅ 支付成功！", show_alert=True)
-            return await show_renew_menu(update, context, sub)
-        else:
-            await query.message.edit_text(
-                f"🎉 **支付成功！**\n\n"
-                f"会员已开通，有效期 {plan['duration_days']} 天。\n"
-                f"您现在可以使用机器人的全部功能了！",
-                parse_mode="Markdown"
-            )
-    else:
-        logger.info(f"check_payment: 未找到匹配交易")
-        try:
-            await query.message.edit_text(
-                f"⌛ **暂未检测到支付**\n\n"
-                f"📦 订单：`{order_id}`\n"
-                f"📌 地址：`{order['payment_address']}`\n"
-                f"💰 金额：{order['amount_usdt']} USDT\n\n"
-                f"请确认已转账后，稍等片刻重新检测\n"
-                f"或联系管理员手动确认。",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🔄 再次检测", callback_data=f"sub_check_{order_id}"),
-                    InlineKeyboardButton("◀️ 返回", callback_data="subscription_menu"),
-                    InlineKeyboardButton("🔄 重新选择套餐", callback_data="sub_renew"),
-                ]]),
-                parse_mode="Markdown"
-            )
-        except Exception:
-            pass
+            manual_confirm_payment 
 
 async def cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """取消订单"""
@@ -1141,8 +998,8 @@ async def manual_confirm_payment(update: Update, context: ContextTypes.DEFAULT_T
     from db_manager import get_conn
     conn = get_conn(0)
     conn.execute(
-        "INSERT OR REPLACE INTO admin_users (user_id, username, first_name, last_name) VALUES (?, ?, ?, ?)",
-        (order["user_id"], query.from_user.username or '', query.from_user.first_name or '', query.from_user.last_name or '')
+        "INSERT OR IGNORE INTO admin_users (user_id) VALUES (?)",
+        (order["user_id"],)
     )
     conn.commit()
 
