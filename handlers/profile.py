@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 from handlers.menu import get_main_menu
-from auth import is_authorized, OWNER_ID, is_admin, get_user_admin_id, list_operators
+from auth import is_authorized, OWNER_ID, is_admin, get_user_admin_id, list_operators, add_admin
 from db import (
     get_monitored_addresses as db_get_monitored_addresses,
     get_user_preferences as db_get_user_preferences,
@@ -25,6 +25,7 @@ PROFILE_MAIN = 1
 SET_SIGNATURE = 2
 FEEDBACK = 3
 EXPORT_DATA = 4
+TRIAL_DURATION_DAYS = 0.003  # 试用天数
 
 # 北京时区
 BEIJING_TZ = timezone(timedelta(hours=8))
@@ -42,13 +43,51 @@ async def _build_profile_menu(user_id: int, prefs: dict = None, display_name: st
     if user_id == OWNER_ID:
         role = "👑 超级管理员"
     elif admin:
-        role = "👤 管理员"
+        # 检查是否是试用用户
+        trial = get_trial_info(user_id)
+        sub = get_user_subscription(user_id)  # ✅ 新增：也查会员
+        if trial and trial["status"] == "active":
+            remaining_seconds = max(0, trial["expire_date"] - int(time.time()))
+            remaining_days = remaining_seconds // 86400
+            remaining_hours = (remaining_seconds % 86400) // 3600
+            remaining_minutes = (remaining_seconds % 3600) // 60
+            if remaining_days > 0:
+                role = f"🎁 试用用户 ({remaining_days}天{remaining_hours}小时)"
+            elif remaining_hours > 0:
+                role = f"🎁 试用用户 ({remaining_hours}小时{remaining_minutes}分钟)"
+            elif remaining_minutes > 0:
+                role = f"🎁 试用用户 ({remaining_minutes}分钟)"
+            else:
+                role = "🎁 试用用户 (即将到期)"
+        elif sub and sub["status"] == "active":  # ✅ 新增：活跃会员
+            remaining_seconds = max(0, sub["expire_date"] - int(time.time()))
+            remaining_days = remaining_seconds // 86400
+            remaining_hours = (remaining_seconds % 86400) // 3600
+            remaining_minutes = (remaining_seconds % 3600) // 60
+            if remaining_days > 0:
+                role = f"👤 管理员 ({remaining_days}天{remaining_hours}小时)"
+            elif remaining_hours > 0:
+                role = f"👤 管理员 ({remaining_hours}小时{remaining_minutes}分钟)"
+            elif remaining_minutes > 0:
+                role = f"👤 管理员 ({remaining_minutes}分钟)"
+            else:
+                role = "👤 管理员 (今日到期)"
+        else:
+            role = "👤 管理员"
     elif full_access:
         role = "👤 正式操作员"
     elif limited_access:
         role = "👥 临时操作员"
     else:
-        role = "🙍 普通用户"
+        # ✅ 检查是否有过期记录
+        trial = get_trial_info(user_id)
+        sub = get_user_subscription(user_id)
+        if trial:
+            role = "🎁 试用用户 (已过期)"
+        elif sub and sub.get("status") in ("expired", "cancelled"):
+            role = "💳 会员 (已过期)"
+        else:
+            role = "🙍 普通用户"
     keyboard = []
     # 个人记账统计
     if full_access or limited_access:
@@ -73,13 +112,65 @@ async def _build_profile_menu(user_id: int, prefs: dict = None, display_name: st
     else:
         sub = get_user_subscription(user_id)
         if sub:
-            # 已开通 → 显示到期信息和续费
             expire_date = datetime.fromtimestamp(sub["expire_date"], tz=BEIJING_TZ).strftime('%Y-%m-%d')
-            remaining = max(0, (sub["expire_date"] - int(time.time())) // 86400)
-            keyboard.append([InlineKeyboardButton(f"💳 续费会员 ({remaining}天)", callback_data="subscription_menu")])
+            remaining_seconds = max(0, sub["expire_date"] - int(time.time()))
+            remaining_days = remaining_seconds // 86400
+            remaining_hours = (remaining_seconds % 86400) // 3600
+            remaining_minutes = (remaining_seconds % 3600) // 60
+            if remaining_days > 0:
+                label = f"💳 续费会员 ({remaining_days}天{remaining_hours}小时)"
+            elif remaining_hours > 0:
+                label = f"💳 续费会员 ({remaining_hours}小时{remaining_minutes}分钟)"
+            elif remaining_minutes > 0:
+                label = f"💳 续费会员 ({remaining_minutes}分钟)"
+            else:
+                label = "💳 续费会员 (今日到期)"
+            keyboard.append([InlineKeyboardButton(label, callback_data="subscription_menu")])
         else:
-            # 未开通 → 升级会员
-            keyboard.append([InlineKeyboardButton("⭐ 升级会员", callback_data="subscription_menu")])
+            # 检查是否是试用用户
+            trial = get_trial_info(user_id)
+            if full_access or limited_access:
+                # ✅ 只有非管理员的正式操作员和临时操作员不显示试用/会员按钮
+                if not admin:
+                    pass
+                elif trial:
+                    # 试用管理员的按钮
+                    remaining_seconds = max(0, trial["expire_date"] - int(time.time()))
+                    remaining_days = remaining_seconds // 86400
+                    remaining_hours = (remaining_seconds % 86400) // 3600
+                    remaining_minutes = (remaining_seconds % 3600) // 60
+                    expire_date = datetime.fromtimestamp(trial["expire_date"], tz=BEIJING_TZ).strftime('%Y-%m-%d')
+                    if trial["status"] == "active" and remaining_seconds > 0:
+                        if remaining_days > 0:
+                            label = f"🎁 试用中 ({remaining_days}天{remaining_hours}小时) - 升级"
+                        elif remaining_hours > 0:
+                            label = f"🎁 试用中 ({remaining_hours}小时{remaining_minutes}分钟) - 升级"
+                        elif remaining_minutes > 0:
+                            label = f"🎁 试用中 ({remaining_minutes}分钟) - 升级"
+                        keyboard.append([InlineKeyboardButton(label, callback_data="subscription_menu")])
+                    else:
+                        keyboard.append([InlineKeyboardButton("⭐ 升级会员", callback_data="subscription_menu")])
+                else:
+                    keyboard.append([InlineKeyboardButton("⭐ 升级会员", callback_data="subscription_menu")])
+            elif trial:
+                remaining_seconds = max(0, trial["expire_date"] - int(time.time()))
+                remaining_days = remaining_seconds // 86400
+                remaining_hours = (remaining_seconds % 86400) // 3600
+                remaining_minutes = (remaining_seconds % 3600) // 60
+                expire_date = datetime.fromtimestamp(trial["expire_date"], tz=BEIJING_TZ).strftime('%Y-%m-%d')
+                if trial["status"] == "active" and remaining_seconds > 0:
+                    if remaining_days > 0:
+                        label = f"🎁 试用中 ({remaining_days}天{remaining_hours}小时) - 升级"
+                    elif remaining_hours > 0:
+                        label = f"🎁 试用中 ({remaining_hours}小时{remaining_minutes}分钟) - 升级"
+                    elif remaining_minutes > 0:
+                        label = f"🎁 试用中 ({remaining_minutes}分钟) - 升级"
+                    keyboard.append([InlineKeyboardButton(label, callback_data="subscription_menu")])
+                else:
+                    keyboard.append([InlineKeyboardButton("⭐ 升级会员", callback_data="subscription_menu")])
+            else:
+                keyboard.append([InlineKeyboardButton("🎁 申请试用", callback_data="profile_trial_start")])
+                keyboard.append([InlineKeyboardButton("⭐ 升级会员", callback_data="subscription_menu")])
         
     # 默认群发附言、数据分析导出、早报
     if full_access:
@@ -898,3 +989,166 @@ async def profile_monitor_group(update: Update, context: ContextTypes.DEFAULT_TY
         parse_mode="Markdown",
         reply_markup=keyboard
     )
+
+def get_trial_info(user_id: int) -> dict:
+    """获取用户试用信息"""
+    from db_manager import get_conn
+    conn = get_conn(0)
+    row = conn.execute(
+        "SELECT * FROM trial_users WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    if row:
+        return dict(row)
+    return None
+
+def create_trial(user_id: int) -> bool:
+    from db_manager import get_conn
+    now = int(time.time())
+    expire = now + TRIAL_DURATION_DAYS * 86400
+    try:
+        # ✅ 先添加管理员（会重置 source 和 expire_date）
+        add_admin(user_id)
+
+        conn = get_conn(0)
+        conn.execute(
+            "INSERT INTO trial_users (user_id, start_date, expire_date) VALUES (?, ?, ?)",
+            (user_id, now, expire)
+        )
+        # ✅ 再 UPDATE 设置正确的 source 和 expire_date
+        conn.execute(
+            "UPDATE admins SET source = 'trial', expire_date = ? WHERE admin_id = ?",
+            (expire, user_id)
+        )
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"创建试用失败: {e}")
+        return False
+
+async def profile_trial_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """申请试用 - 确认弹窗"""
+    query = update.callback_query
+    user_id = query.from_user.id
+    await query.answer()
+
+    # 检查是否已经试用过
+    trial = get_trial_info(user_id)
+    if trial:
+        expire_date = datetime.fromtimestamp(trial["expire_date"], tz=BEIJING_TZ).strftime('%Y-%m-%d %H:%M')
+        remaining_seconds = max(0, trial["expire_date"] - int(time.time()))
+        remaining_days = remaining_seconds // 86400
+        remaining_hours = (remaining_seconds % 86400) // 3600
+
+        remaining_minutes = (remaining_seconds % 3600) // 60
+        if trial["status"] == "active" and remaining_seconds > 0:
+            if remaining_days > 0:
+                remain_text = f"{remaining_days}天{remaining_hours}小时"
+            elif remaining_hours > 0:
+                remain_text = f"{remaining_hours}小时{remaining_minutes}分钟"
+            else:
+                remain_text = f"{remaining_minutes}分钟"
+
+            await query.message.edit_text(
+                f"🎁 **您已经是试用用户**\n\n"
+                f"📅 试用到期时间：{expire_date}\n"
+                f"⏳ 剩余时间：**{remain_text}**\n\n"
+                f"💡 试用期间您可以使用机器人的全部功能\n"
+                f"⚠️ 试用到期后数据保留 7 天\n\n"
+                f"👉 点击下方「升级会员」成为正式用户：",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⭐ 升级会员", callback_data="subscription_menu")],
+                    [InlineKeyboardButton("◀️ 返回个人中心", callback_data="profile_return")],
+                ]),
+                parse_mode="Markdown"
+            )
+        else:
+            await query.message.edit_text(
+                f"😔 **试用已过期**\n\n"
+                f"📅 试用到期时间：{expire_date}\n\n"
+                f"⚠️ 您的数据将在到期后 7 天内清除\n"
+                f"👉 点击下方「升级会员」保留全部数据：",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⭐ 升级会员", callback_data="subscription_menu")],
+                    [InlineKeyboardButton("◀️ 返回个人中心", callback_data="profile_return")],
+                ]),
+                parse_mode="Markdown"
+            )
+        return
+
+    # 确认试用弹窗
+    keyboard = [
+        [InlineKeyboardButton("✅ 确认试用", callback_data="trial_confirm")],
+        [InlineKeyboardButton("❌ 取消", callback_data="profile_return")],
+    ]
+
+    await query.message.edit_text(
+        f"🎁 **申请试用**\n\n"
+        f"📅 试用时长：**{TRIAL_DURATION_DAYS} 天**\n"
+        f"🎯 试用权限：\n"
+        f"• 所有功能均可使用\n"
+        f"• 独立数据空间\n"
+        f"• 群组管理权限\n\n"
+        f"⚠️ **注意事项**：\n"
+        f"• 每个用户仅可试用一次\n"
+        f"• 试用到期后数据保留 7 天\n"
+        f"• 请及时升级会员保留数据\n\n"
+        f"确认开始试用吗？",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+
+async def trial_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """确认试用"""
+    query = update.callback_query
+    user_id = query.from_user.id
+    await query.answer()
+
+    # 再次检查是否已有试用
+    trial = get_trial_info(user_id)
+    if trial:
+        await query.answer("您已经申请过试用", show_alert=True)
+        return await profile_trial_start(update, context)
+
+    # 创建试用
+    success = create_trial(user_id)
+
+    if success:
+        from auth import load_admins_from_db
+        load_admins_from_db()  # 重新加载管理员列表
+
+        # ✅ 写入 admin_users 表存储用户信息
+        user = query.from_user
+        from db_manager import get_conn
+        conn = get_conn(0)
+        conn.execute(
+            "INSERT OR REPLACE INTO admin_users (user_id, username, first_name, last_name) VALUES (?, ?, ?, ?)",
+            (user_id, user.username or '', user.first_name or '', user.last_name or '')
+        )
+        conn.commit()
+
+        expire_date = datetime.fromtimestamp(
+            int(time.time()) + TRIAL_DURATION_DAYS * 86400, 
+            tz=BEIJING_TZ
+        ).strftime('%Y-%m-%d %H:%M')
+
+        await query.message.edit_text(
+            f"🎉 **试用开通成功！**\n\n"
+            f"📅 试用到期时间：{expire_date}\n"
+            f"⏳ 试用时长：{TRIAL_DURATION_DAYS} 天\n\n"
+            f"✅ 您现在可以使用机器人的全部功能了！\n"
+            f"💡 试用到期后数据保留 7 天\n"
+            f"⚠️ 请及时升级会员以保留数据\n\n"
+            f"👉 点击下方查看个人中心：",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⭐ 升级会员", callback_data="subscription_menu")],
+                [InlineKeyboardButton("👤 个人中心", callback_data="profile_return")],
+            ]),
+            parse_mode="Markdown"
+        )
+    else:
+        await query.message.edit_text(
+            "❌ 试用开通失败，请稍后重试",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀️ 返回个人中心", callback_data="profile_return")],
+            ])
+        )
