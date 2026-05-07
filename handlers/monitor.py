@@ -206,8 +206,7 @@ async def _check_single_address_safe(addr_info, admin_id, context, current_time)
 
 async def _check_single_address(addr_info, admin_id, context, current_time):
     """
-    检查单个地址的交易（从原 check_address_transactions 提取出来的逻辑）
-    这段代码就是原来 check_address_transactions 里面处理单个地址的部分
+    检查单个地址的交易（每个添加者独立通知）
     """
     bot = context.bot
     address = addr_info["address"]
@@ -220,7 +219,7 @@ async def _check_single_address(addr_info, admin_id, context, current_time):
     if added_by:
         prefs = db_get_user_preferences(added_by, admin_id)
         if not prefs.get("monitor_notify", True):
-            return  # 直接返回，不检查
+            return  # 该用户关闭了通知，直接返回
 
     # 确定查询起始时间
     if last_check == 0:
@@ -245,24 +244,18 @@ async def _check_single_address(addr_info, admin_id, context, current_time):
         amount = int(raw_amount) / 1_000_000 if raw_amount else 0
         timestamp = tx.get("block_timestamp", 0) / 1000
 
-        if db_is_tx_notified(admin_id, tx_id):
+        # 🔥 关键修改：检查该交易是否已通知给当前用户
+        if db_is_tx_notified(admin_id, tx_id, user_id=added_by):
             continue
 
+        # 跳过添加时间之前的历史交易
         if last_check == 0 and timestamp < added_at:
-            db_mark_tx_notified(admin_id, tx_id)
+            db_mark_tx_notified(admin_id, tx_id, user_id=added_by)
             continue
 
-        # 检查是否已存在
-        conn = get_conn(admin_id)
-        c = conn.cursor()
-        c.execute("SELECT id, notified FROM address_transactions WHERE tx_id = ?", (tx_id,))
-        existing = c.fetchone()
-        if existing:
-            if existing[1] == 0:
-                db_mark_tx_notified(admin_id, tx_id)
-            continue
-
-        db_add_transaction_record(admin_id, address, tx_id, from_addr, to_addr, amount, int(timestamp))
+        # 🔥 记录交易（传递 user_id 用于初始化 notified 字段）
+        db_add_transaction_record(admin_id, address, tx_id, from_addr, to_addr, 
+                                   amount, int(timestamp), user_id=added_by)
 
         # 发送通知
         direction = "收到" if to_addr == address else "转出"
@@ -297,12 +290,14 @@ async def _check_single_address(addr_info, admin_id, context, current_time):
 
         try:
             await bot.send_message(chat_id=added_by, text=message, parse_mode="Markdown")
-            logger.info(f"已发送监控通知给用户 {added_by} (备注: {note or '无'})")
+            logger.info(f"[{added_by}] 已发送监控通知 (备注: {note or '无'})")
         except Exception as e:
-            logger.error(f"发送给用户 {added_by} 失败: {e}")
+            logger.error(f"[{added_by}] 发送通知失败: {e}")
 
-        db_mark_tx_notified(admin_id, tx_id)
+        # 🔥 标记该用户已通知
+        db_mark_tx_notified(admin_id, tx_id, user_id=added_by)
 
+    # 更新最后检查时间
     db_update_address_last_check(admin_id, address, current_time)
 
 # ==================== 键盘菜单 ====================
