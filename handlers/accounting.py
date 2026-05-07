@@ -246,6 +246,7 @@ class Calculator:
     def safe_eval(expr: str):
         """安全计算表达式"""
         try:
+            expr = expr.replace('（', '(').replace('）', ')')
             # 预处理：替换 ^ 为 **
             expr = expr.replace('^', '**')
 
@@ -825,7 +826,7 @@ class AccountingManager:
                 last_seen INTEGER NOT NULL,
                 PRIMARY KEY (group_id, user_id)
             );
-            
+
             -- ✅ 新增：用户个性化配置表
             CREATE TABLE IF NOT EXISTS user_config (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2116,17 +2117,17 @@ async def handle_add_income(update: Update, context: ContextTypes.DEFAULT_TYPE,
         amount_usdt = with_fee / actual_exchange_rate
     else:
         amount_usdt = amount
-        
+
     success, _ = am.add_record(
         group_id, user.id, username, 'income', record_amount, desc,
         category, actual_exchange_rate, message_id, actual_fee_rate, cur_admin_id
     )
-    
+
     if success:
         stats = am.get_current_stats(group_id, admin_id=cur_admin_id)
         records = am.get_current_records(group_id, admin_id=cur_admin_id)
         message_text = format_bill_message(stats, records, "当前账单")
-        
+
         # ✅ 构建反馈信息
         prefix = f"✅ 已记录修正入款：-{abs(amount):.2f}" if is_correction else f"✅ 已记录入款：{amount:.2f}"
         if category:
@@ -2144,7 +2145,7 @@ async def handle_add_income(update: Update, context: ContextTypes.DEFAULT_TYPE,
             prefix += f"\n{' | '.join(config_info)}"
 
         prefix += f"\n⚙️ 费率：{actual_fee_rate}% | 汇率：{actual_exchange_rate} | 单笔费用：{actual_per_fee}元"
-        
+
         view_button = InlineKeyboardButton("📊 查看当前账单", callback_data="view_current_bill")
         reply_markup = InlineKeyboardMarkup([[view_button]])
 
@@ -3520,6 +3521,7 @@ async def handle_calculator(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat.type not in ['group', 'supergroup']:
         return
     text = update.message.text.strip()
+    text = text.replace('（', '(').replace('）', ')')
     exclude_prefixes = ['设置手续费', '设置汇率', '设置单笔费用', '结束账单', '今日总', '总', 
                         '当前账单', '查询账单', '清理账单', '清空账单', '清理总账单', 
                         '清空总账单', '清空所有账单', '下发', '+', '-']
