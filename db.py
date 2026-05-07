@@ -201,32 +201,103 @@ def update_address_last_check(admin_id: int, address: str, last_check: int):
     conn.execute("UPDATE monitored_addresses SET last_check = ? WHERE address = ?", (last_check, address))
     conn.commit()
 
-def add_transaction_record(admin_id: int, address: str, tx_id: str, from_addr: str, to_addr: str, amount: float, timestamp: int):
+# db.py - 修改以下 3 个函数
+
+def is_tx_notified(admin_id: int, tx_id: str, user_id: int = None) -> bool:
+    """
+    检查交易是否已通知给指定用户
+    如果 user_id 为 None，检查是否已通知过任何人（兼容旧逻辑）
+    """
+    if admin_id == 0:
+        return False
+    conn = get_conn(admin_id)
+    row = conn.execute("SELECT notified FROM address_transactions WHERE tx_id = ?", (tx_id,)).fetchone()
+    
+    if not row:
+        return False
+    
+    if user_id is None:
+        # 兼容旧逻辑：只要有记录就认为已通知
+        return True
+    
+    # ✅ 检查该用户是否在已通知列表中
+    notified_str = row[0] or ""
+    if notified_str == 'all':
+        return True
+    notified_users = [uid.strip() for uid in notified_str.split(",") if uid.strip()]
+    return str(user_id) in notified_users
+
+
+def mark_tx_notified(admin_id: int, tx_id: str, user_id: int = None):
+    """
+    标记交易为已通知给指定用户
+    如果 user_id 为 None，标记为已通知所有人（兼容旧逻辑）
+    """
+    if admin_id == 0:
+        return
+    conn = get_conn(admin_id)
+    
+    if user_id is None:
+        conn.execute("UPDATE address_transactions SET notified = 'all' WHERE tx_id = ?", (tx_id,))
+    else:
+        row = conn.execute("SELECT notified FROM address_transactions WHERE tx_id = ?", (tx_id,)).fetchone()
+        
+        if row and row[0]:
+            notified_str = row[0]
+            if notified_str == 'all':
+                # 已通知所有人，无需更新
+                conn.commit()
+                return
+            notified_users = [uid.strip() for uid in notified_str.split(",") if uid.strip()]
+        else:
+            notified_users = []
+        
+        if str(user_id) not in notified_users:
+            notified_users.append(str(user_id))
+        
+        conn.execute("UPDATE address_transactions SET notified = ? WHERE tx_id = ?", 
+                  (",".join(notified_users), tx_id))
+    
+    conn.commit()
+
+
+def add_transaction_record(admin_id: int, address: str, tx_id: str, from_addr: str, 
+                           to_addr: str, amount: float, timestamp: int, user_id: int = None):
+    """
+    添加交易记录
+    新增 user_id 参数，初始化 notified 字段
+    """
     if admin_id == 0:
         return False
     conn = get_conn(admin_id)
     try:
-        conn.execute("INSERT INTO address_transactions (address, tx_id, from_addr, to_addr, amount, timestamp, notified) VALUES (?, ?, ?, ?, ?, ?, 0)",
-                     (address, tx_id, from_addr, to_addr, amount, timestamp))
+        # 检查是否已存在
+        row = conn.execute("SELECT id, notified FROM address_transactions WHERE tx_id = ?", (tx_id,)).fetchone()
+        
+        if row:
+            # 已存在，更新 notified 列表
+            if user_id is not None:
+                notified_str = row[1] or ""
+                if notified_str != 'all':
+                    notified_users = [uid.strip() for uid in notified_str.split(",") if uid.strip()]
+                    if str(user_id) not in notified_users:
+                        notified_users.append(str(user_id))
+                        conn.execute("UPDATE address_transactions SET notified = ? WHERE id = ?",
+                                  (",".join(notified_users), row[0]))
+            conn.commit()
+            return True
+        
+        # 新增记录
+        initial_notified = str(user_id) if user_id else ""
+        conn.execute("""
+            INSERT INTO address_transactions (address, tx_id, from_addr, to_addr, amount, timestamp, notified)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (address, tx_id, from_addr, to_addr, amount, timestamp, initial_notified))
         conn.commit()
         return True
     except Exception as e:
         print(f"添加交易记录失败: {e}")
         return False
-
-def is_tx_notified(admin_id: int, tx_id: str):
-    if admin_id == 0:
-        return False
-    conn = get_conn(admin_id)
-    row = conn.execute("SELECT notified FROM address_transactions WHERE tx_id = ?", (tx_id,)).fetchone()
-    return row is not None and row[0] == 1
-
-def mark_tx_notified(admin_id: int, tx_id: str):
-    if admin_id == 0:
-        return
-    conn = get_conn(admin_id)
-    conn.execute("UPDATE address_transactions SET notified = 1 WHERE tx_id = ?", (tx_id,))
-    conn.commit()
 
 # ---------- 用户偏好 ----------
 def get_user_preferences(user_id: int, admin_id: int = 0):
