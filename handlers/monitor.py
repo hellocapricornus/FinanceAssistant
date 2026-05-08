@@ -229,7 +229,7 @@ async def _check_single_address(addr_info, admin_id, context, current_time):
 
     txs = await get_trc20_transactions(address, min_timestamp)
     if not txs:
-        db_update_address_last_check(admin_id, address, current_time)
+        db_update_address_last_check(admin_id, address, current_time, user_id=added_by)
         return
 
     # 获取当前余额和月度统计
@@ -298,7 +298,7 @@ async def _check_single_address(addr_info, admin_id, context, current_time):
         db_mark_tx_notified(admin_id, tx_id, user_id=added_by)
 
     # 更新最后检查时间
-    db_update_address_last_check(admin_id, address, current_time)
+    db_update_address_last_check(admin_id, address, current_time, user_id=added_by)
 
 # ==================== 键盘菜单 ====================
 def get_monitor_keyboard_markup(user_id: int = None):
