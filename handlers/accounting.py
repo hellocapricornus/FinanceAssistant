@@ -3560,30 +3560,22 @@ async def handle_calculator(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 result = a_num * b_num
             elif op == '/':
                 if b_num == 0:
-                    await update.message.reply_text("❌ 除数不能为0")
-                    return
+                    return  # 🔥 静默
                 result = a_num / b_num
             elif op == '%':
                 result = a_num % b_num
             else:
-                return
+                return  # 🔥 静默
             result_str = str(int(result)) if result.is_integer() else f"{result:.2f}"
             await update.message.reply_text(f"🧮 {a}{op}{b} = {result_str}")
             return
-        except Exception as e:
-            await update.message.reply_text(f"❌ 计算错误：{str(e)[:50]}")
-            return
+        except Exception:
+            return  # 🔥 静默
     result = Calculator.safe_eval(text)
     if result is not None:
         result_str = Calculator.format_result(result)
         await update.message.reply_text(f"🧮 {text} = {result_str}")
-    else:
-        await update.message.reply_text(
-            "❌ 请输入完整计算格式\n"
-            "支持的运算符：+ - * / % ^ ( )\n"
-            "支持的函数：sqrt, sin, cos, tan, log, abs, round, floor, ceil\n"
-            "支持的常数：pi, e\n"
-        )
+    # 🔥 无效表达式静默，不输出提示
 
 async def handle_user_info_tracking(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
