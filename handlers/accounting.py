@@ -4446,13 +4446,13 @@ async def handle_operator_mention(update: Update, context: ContextTypes.DEFAULT_
     """处理群组内通过 @ 添加/删除临时操作人"""
     message = update.message
     chat = update.effective_chat
-    user = message.from_user  # ✅ 这个函数是独立的，可以正确定义 user
+    user = message.from_user
     user_id = user.id
     text = message.text.strip()
 
     # 权限检查
     from auth import is_authorized, get_user_admin_id
-    if not is_authorized(user_id, require_full_access=False):  # ✅ 使用 user_id
+    if not is_authorized(user_id, require_full_access=False):
         await message.reply_text("❌ 您没有权限管理操作人")
         return
 
@@ -4469,8 +4469,10 @@ async def handle_operator_mention(update: Update, context: ContextTypes.DEFAULT_
     if message.entities:
         for entity in message.entities:
             if entity.type == "text_mention" and entity.user:
+                # 直接 @ 用户（有 user 对象）
                 mentioned_users.append(entity.user)
             elif entity.type == "mention":
+                # @username 形式
                 username = text[entity.offset:entity.offset + entity.length].lstrip('@')
                 mentioned_users.append(username)
 
@@ -4492,30 +4494,55 @@ async def handle_operator_mention(update: Update, context: ContextTypes.DEFAULT_
 
     for mentioned in mentioned_users:
         if isinstance(mentioned, str):
+            # @username 形式，尝试通过 Telegram API 获取用户信息
+            username = mentioned
             found = False
-            from auth import admins
-            for aid in admins.keys():
-                from db_manager import get_conn
-                conn = get_conn(aid)
-                row = conn.execute(
-                    "SELECT user_id, first_name, username FROM group_users WHERE username = ? LIMIT 1",
-                    (mentioned,)
-                ).fetchone()
-                if row:
-                    user_ids_to_process.append(row[0])
-                    user_info_list.append({
-                        "id": row[0],
-                        "name": row[1] or row[2] or mentioned
-                    })
-                    found = True
-                    break
+            
+            # ✅ 方法1：尝试通过 get_chat 获取用户（Telegram API）
+            try:
+                # 先尝试在本地数据库中查找（更快）
+                for aid in admins.keys():
+                    from db_manager import get_conn
+                    conn = get_conn(aid)
+                    row = conn.execute(
+                        "SELECT user_id, first_name, username FROM group_users WHERE username = ? LIMIT 1",
+                        (username,)
+                    ).fetchone()
+                    if row:
+                        user_ids_to_process.append(row[0])
+                        user_info_list.append({
+                            "id": row[0],
+                            "name": row[1] or row[2] or username
+                        })
+                        found = True
+                        break
+            except Exception as e:
+                print(f"[DEBUG] 数据库查找用户失败: {e}")
+            
+            # ✅ 方法2：如果数据库没找到，尝试通过 Telegram API 获取
+            if not found:
+                try:
+                    # 通过 @username 获取用户信息
+                    chat = await context.bot.get_chat(f"@{username}")
+                    if chat:
+                        user_ids_to_process.append(chat.id)
+                        user_info_list.append({
+                            "id": chat.id,
+                            "name": chat.first_name or chat.username or username
+                        })
+                        found = True
+                        print(f"[DEBUG] 通过 Telegram API 找到用户: {username} -> {chat.id}")
+                except Exception as e:
+                    print(f"[DEBUG] Telegram API 查找用户失败 @{username}: {e}")
+            
             if not found:
                 user_info_list.append({
                     "id": None,
-                    "name": f"@{mentioned}",
+                    "name": f"@{username}",
                     "unknown": True
                 })
         else:
+            # 直接 @ 用户（有 user 对象）
             user_ids_to_process.append(mentioned.id)
             user_info_list.append({
                 "id": mentioned.id,
@@ -4531,7 +4558,10 @@ async def handle_operator_mention(update: Update, context: ContextTypes.DEFAULT_
                 await message.reply_text(
                     f"❌ 无法找到以下用户，请确认用户名正确：\n"
                     + "\n".join([f"• {u['name']}" for u in unknown_users]) +
-                    "\n\n💡 提示：请使用 @用户名 或直接回复用户消息"
+                    "\n\n💡 **提示**：\n"
+                    "• 请确保用户名拼写正确（不包含 @ 符号）\n"
+                    "• 用户需要先与机器人有过交互\n"
+                    "• 或尝试回复该用户的消息来添加"
                 )
             return
 
