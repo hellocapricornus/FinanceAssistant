@@ -145,7 +145,7 @@ def init_admin_db(admin_id: int):
             to_addr TEXT,
             amount REAL,
             timestamp INTEGER NOT NULL,
-            notified INTEGER DEFAULT 0
+            notified TEXT DEFAULT ''
         );
 
         -- 记账记录表
