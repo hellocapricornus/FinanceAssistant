@@ -4468,12 +4468,10 @@ async def handle_operator_mention(update: Update, context: ContextTypes.DEFAULT_
     if message.entities:
         for entity in message.entities:
             if entity.type == "text_mention" and entity.user:
-                # 直接 @ 用户（有 user 对象）
-                mentioned_users.append({"type": "user", "data": entity.user})
+                mentioned_users.append(entity.user)
             elif entity.type == "mention":
-                # @username 形式
                 username = text[entity.offset:entity.offset + entity.length].lstrip('@')
-                mentioned_users.append({"type": "username", "data": username})
+                mentioned_users.append(username)
 
     if not mentioned_users:
         await message.reply_text(
@@ -4492,91 +4490,59 @@ async def handle_operator_mention(update: Update, context: ContextTypes.DEFAULT_
     user_info_list = []
 
     for mentioned in mentioned_users:
-        if mentioned["type"] == "user":
-            # 直接有 user 对象
-            user_obj = mentioned["data"]
-            user_ids_to_process.append(user_obj.id)
-            user_info_list.append({
-                "id": user_obj.id,
-                "name": user_obj.first_name or user_obj.username or str(user_obj.id)
-            })
-        elif mentioned["type"] == "username":
-            # @username 形式，需要查找用户 ID
-            username = mentioned["data"]
-            found_user_id = None
-            found_user_name = None
+        if isinstance(mentioned, str):
+            # @username 形式
+            username = mentioned
+            found = False
 
-            # ✅ 方法1：尝试在所有管理员的 group_users 表中查找
-            try:
-                from auth import admins
-                for aid in admins.keys():
-                    try:
-                        from db_manager import get_conn
-                        conn = get_conn(aid)
-                        # 先确保表存在
-                        conn.execute("""
-                            CREATE TABLE IF NOT EXISTS group_users (
-                                group_id TEXT NOT NULL,
-                                user_id INTEGER NOT NULL,
-                                username TEXT,
-                                first_name TEXT,
-                                last_name TEXT,
-                                last_seen INTEGER NOT NULL,
-                                PRIMARY KEY (group_id, user_id)
-                            )
-                        """)
-                        row = conn.execute(
-                            "SELECT user_id, first_name, username FROM group_users WHERE username = ? LIMIT 1",
-                            (username,)
-                        ).fetchone()
-                        if row:
-                            found_user_id = row[0]
-                            found_user_name = row[1] or row[2] or username
-                            print(f"[DEBUG] 在管理员 {aid} 的数据库中找到用户: {username} -> {found_user_id}")
-                            break
-                    except Exception as e:
-                        print(f"[DEBUG] 查询管理员 {aid} 的数据库失败: {e}")
-                        continue
-            except Exception as e:
-                print(f"[DEBUG] 数据库查找失败: {e}")
-
-            # ✅ 方法2：如果数据库没找到，通过 Telegram API 获取
-            if not found_user_id:
+            # 先从数据库查找
+            from auth import admins
+            for aid in admins.keys():
                 try:
-                    print(f"[DEBUG] 尝试通过 Telegram API 查找用户: @{username}")
-                    chat = await context.bot.get_chat(f"@{username}")
-                    if chat:
-                        found_user_id = chat.id
-                        found_user_name = chat.first_name or chat.username or username
-                        print(f"[DEBUG] 通过 Telegram API 找到用户: @{username} -> {found_user_id}")
-                except Exception as e:
-                    print(f"[DEBUG] Telegram API 查找用户失败 @{username}: {e}")
+                    from db_manager import get_conn
+                    conn = get_conn(aid)
+                    row = conn.execute(
+                        "SELECT user_id, first_name, username FROM group_users WHERE username = ? LIMIT 1",
+                        (username,)
+                    ).fetchone()
+                    if row:
+                        user_ids_to_process.append(row[0])
+                        user_info_list.append({
+                            "id": row[0],
+                            "name": row[1] or row[2] or username
+                        })
+                        found = True
+                        break
+                except:
+                    pass
 
-            # ✅ 方法3：尝试通过 resolve_username 获取（另一种 API 方式）
-            if not found_user_id:
+            # ✅ 数据库找不到，通过 Telegram API 查找
+            if not found:
                 try:
-                    print(f"[DEBUG] 尝试通过 get_chat 查找用户: {username}")
-                    # 有些情况下不带 @ 也能查到
-                    chat = await context.bot.get_chat(username)
-                    if chat:
-                        found_user_id = chat.id
-                        found_user_name = chat.first_name or chat.username or username
-                        print(f"[DEBUG] 通过 get_chat 找到用户: {username} -> {found_user_id}")
+                    chat_obj = await context.bot.get_chat(f"@{username}")
+                    if chat_obj:
+                        user_ids_to_process.append(chat_obj.id)
+                        user_info_list.append({
+                            "id": chat_obj.id,
+                            "name": chat_obj.first_name or chat_obj.username or username
+                        })
+                        found = True
                 except Exception as e:
-                    print(f"[DEBUG] get_chat 查找用户失败 {username}: {e}")
+                    pass
 
-            if found_user_id:
-                user_ids_to_process.append(found_user_id)
-                user_info_list.append({
-                    "id": found_user_id,
-                    "name": found_user_name
-                })
-            else:
+            if not found:
                 user_info_list.append({
                     "id": None,
                     "name": f"@{username}",
                     "unknown": True
                 })
+        else:
+            # 直接 @ 用户（有 user 对象）
+            user_ids_to_process.append(mentioned.id)
+            user_info_list.append({
+                "id": mentioned.id,
+                "name": mentioned.first_name or mentioned.username or str(mentioned.id)
+            })
 
     valid_ids = [u["id"] for u in user_info_list if u["id"] is not None and not u.get("unknown")]
     unknown_users = [u for u in user_info_list if u.get("unknown")]
@@ -4585,15 +4551,11 @@ async def handle_operator_mention(update: Update, context: ContextTypes.DEFAULT_
         if not valid_ids:
             if unknown_users:
                 await message.reply_text(
-                    f"❌ 无法找到以下用户，请确认：\n"
+                    f"❌ 无法找到以下用户，请确认用户名正确：\n"
                     + "\n".join([f"• {u['name']}" for u in unknown_users]) +
-                    "\n\n💡 **可能的原因**：\n"
-                    "• 用户名拼写错误（不包含 @ 符号）\n"
-                    "• 该用户未与机器人有过交互\n"
-                    "• 该用户已注销或不存在\n\n"
-                    "🔧 **解决方法**：\n"
-                    "• 回复该用户的消息，发送「添加操作人」\n"
-                    "• 先让该用户私聊机器人发送任意消息"
+                    "\n\n💡 提示：\n"
+                    "• 回复该用户的消息来添加\n"
+                    "• 或让该用户先私聊机器人"
                 )
             return
 
