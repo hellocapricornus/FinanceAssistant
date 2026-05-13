@@ -15,6 +15,15 @@ operators: Dict[int, dict] = {}
 temp_operators: Dict[int, dict] = {}
 admins: Dict[int, dict] = {}
 
+def safe_escape_markdown(text: str) -> str:
+    """转义 Markdown 特殊字符，防止报错"""
+    if not text:
+        return text
+    escape_chars = r'_*[]()~`>#+-=|{}.!'
+    for char in escape_chars:
+        text = text.replace(char, f'\\{char}')
+    return text
+
 
 def load_admins_from_db():
     global admins
@@ -284,6 +293,7 @@ def get_operators_list_text(user_id: int = None) -> str:
                 display_name = f"{display_name} (@{username})" if display_name else f"@{username}"
             else:
                 display_name = display_name or f"用户{uid}"
+            display_name = safe_escape_markdown(display_name)
             text += f"  👤 {display_name}\n     🆔 ID: `{uid}`\n"
     else:
         text += "  📭 暂无正式操作人\n"
@@ -301,11 +311,11 @@ def get_operators_list_text(user_id: int = None) -> str:
                 display_name = f"{display_name} (@{username})" if display_name else f"@{username}"
             else:
                 display_name = display_name or f"用户{uid}"
+            display_name = safe_escape_markdown(display_name)
             text += f"  👤 {display_name}\n     🆔 ID: `{uid}`\n"
     else:
         text += "  📭 暂无临时操作人\n"
     return text
-
 
 async def add_temp_operator(user_id: int, added_by: int, context: ContextTypes.DEFAULT_TYPE = None) -> bool:
     if user_id in temp_operators or user_id in operators:
@@ -363,6 +373,7 @@ def get_temp_operators_list_text() -> str:
             display_name = f"{display_name} (@{username})" if display_name else f"@{username}"
         else:
             display_name = display_name or f"用户{user_id}"
+        display_name = safe_escape_markdown(display_name)
         text += f"👤 {display_name}\n🆔 ID: `{user_id}`\n" + "━" * 20 + "\n"
     return text
 
