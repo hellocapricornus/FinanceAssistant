@@ -76,19 +76,28 @@ def close_all_connections():
 # ==================== 独立数据库初始化 ====================
 def init_admin_db(admin_id: int):
     """
-    初始化一个管理员的独立数据库（如果已存在则跳过）
+    初始化一个管理员的独立数据库（如果已存在则补全缺失的表）
     注意：此函数不会自动创建 master.db 中的管理员记录，只创建物理文件
     """
     db_path = os.path.join(DATA_DIR, f"admin_{admin_id}.db")
+
+    need_update = False
+
     if os.path.exists(db_path):
         conn = sqlite3.connect(db_path)
         c = conn.cursor()
-        c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='user_preferences'")
-        if c.fetchone():
-            conn.close()
-            return
+        # 检查多个核心表是否存在
+        required_tables = ['groups', 'rules', 'performance_records', 'commission_config']
+        for table in required_tables:
+            c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
+            if not c.fetchone():
+                need_update = True
+                break
         conn.close()
-        os.remove(db_path)
+
+        if not need_update:
+            return  # 所有表都存在，跳过
+        # 否则需要补建缺失的表
 
     _ensure_data_dir()
     conn = sqlite3.connect(db_path)
@@ -181,7 +190,7 @@ def init_admin_db(admin_id: int):
             per_transaction_fee REAL DEFAULT 0.0
         );
 
-        -- 群组用户表（用于显示操作人昵称等）
+        -- 群组用户表
         CREATE TABLE IF NOT EXISTS group_users (
             group_id TEXT NOT NULL,
             user_id INTEGER NOT NULL,
@@ -192,7 +201,7 @@ def init_admin_db(admin_id: int):
             PRIMARY KEY (group_id, user_id)
         );
 
-        -- 地址查询记录表（用于统计查询次数）
+        -- 地址查询记录表
         CREATE TABLE IF NOT EXISTS address_queries (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             group_id TEXT NOT NULL,
@@ -212,7 +221,7 @@ def init_admin_db(admin_id: int):
             balance REAL
         );
 
-        -- 用户偏好表（每个管理员的用户偏好独立）
+        -- 用户偏好表
         CREATE TABLE IF NOT EXISTS user_preferences (
             user_id INTEGER PRIMARY KEY,
             monitor_notify INTEGER DEFAULT 1,
@@ -235,7 +244,60 @@ def init_admin_db(admin_id: int):
             UNIQUE(group_id, user_id)
         );
 
+        -- 规则管理表
+        CREATE TABLE IF NOT EXISTS rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rule_name TEXT NOT NULL,
+            rule_content TEXT NOT NULL,
+            created_by INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            is_active INTEGER DEFAULT 1
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_rules_name ON rules(rule_name);
+
+        -- 系统设置表
+        CREATE TABLE IF NOT EXISTS system_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at INTEGER DEFAULT 0
+        );
+
+        -- 公司提成配置表（每个管理员独立配置）
+        CREATE TABLE IF NOT EXISTS commission_config (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_rate REAL DEFAULT 10.0,
+            customer_rate REAL DEFAULT 10.0,
+            updated_at INTEGER DEFAULT 0,
+            updated_by INTEGER DEFAULT 0
+        );
+
+        -- 业绩记录表（带提成比例字段）
+        CREATE TABLE IF NOT EXISTS performance_records (
+            id INTEGER PRIMARY KEY,
+            country TEXT NOT NULL,
+            channel_income REAL NOT NULL,
+            customer_expense REAL NOT NULL,
+            profit REAL NOT NULL,
+            channel_group TEXT DEFAULT '',
+            customer_group TEXT DEFAULT '',
+            channel_employee_id INTEGER NOT NULL,
+            channel_employee_name TEXT DEFAULT '',
+            customer_employee_id INTEGER NOT NULL,
+            customer_employee_name TEXT DEFAULT '',
+            channel_rate REAL DEFAULT 10.0,
+            customer_rate REAL DEFAULT 10.0,
+            created_by INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            admin_id INTEGER DEFAULT 0
+        );
+
         -- 索引
+        CREATE INDEX IF NOT EXISTS idx_perf_date ON performance_records(date);
+        CREATE INDEX IF NOT EXISTS idx_perf_channel_emp ON performance_records(channel_employee_id);
+        CREATE INDEX IF NOT EXISTS idx_perf_customer_emp ON performance_records(customer_employee_id);
+        CREATE INDEX IF NOT EXISTS idx_perf_admin_id ON performance_records(admin_id);
         CREATE INDEX IF NOT EXISTS idx_records_group_id ON accounting_records(group_id);
         CREATE INDEX IF NOT EXISTS idx_records_session_id ON accounting_records(session_id);
         CREATE INDEX IF NOT EXISTS idx_records_date ON accounting_records(date);
@@ -246,11 +308,12 @@ def init_admin_db(admin_id: int):
         CREATE INDEX IF NOT EXISTS idx_users_group_id ON group_users(group_id);
     """)
 
-    # 插入默认分类“未分类”
+    # 插入默认分类
     now = int(time.time())
     conn.execute("INSERT OR IGNORE INTO group_categories (category_name, created_at) VALUES ('未分类', ?)", (now,))
     conn.commit()
-    print(f"✅ 已创建管理员 {admin_id} 的独立数据库: {db_path}")
+    conn.close()
+    print(f"✅ 已创建/更新管理员 {admin_id} 的独立数据库: {db_path}")
 
 
 # ==================== 主数据库初始化 ====================
