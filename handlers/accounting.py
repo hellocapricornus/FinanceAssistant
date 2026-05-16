@@ -4790,6 +4790,24 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     # ========== 计算器 ==========
     await handle_calculator(update, context)
 
+    # ========== 规则查询（必须在权限检查之前） ==========
+    if text and text.startswith('发送') and text.endswith('规则') and len(text) >= 6:
+        if is_authorized(message.from_user.id, require_full_access=False):
+            admin_id_rule = get_user_admin_id(message.from_user.id)
+            if admin_id_rule != 0:
+                from db import get_rule_global_status, search_rule as db_search_rule
+                if get_rule_global_status(admin_id_rule):
+                    rule_name = text[2:-2].strip()
+                    if rule_name:
+                        rule_content = db_search_rule(admin_id_rule, rule_name)
+                        if rule_content:
+                            await message.reply_text(
+                                f"📋 **{rule_name}规则**\n\n{rule_content}",
+                                parse_mode='Markdown'
+                            )
+                        return
+        return
+
     # ========== 权限检查 ==========
     if not is_authorized(user_id, require_full_access=False):
         return
@@ -5055,35 +5073,4 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 await message.reply_text("❌ 格式错误：下发-金额u（如：下发-50u）")
         except:
             await message.reply_text("❌ 格式错误：下发-金额u（如：下发-50u）")
-        return
-
-    # ========== AI 对话 ==========
-    bot_username = context.bot.username
-    is_at_bot = text.startswith(f"@{bot_username}") or f"@{bot_username}" in text
-    if is_at_bot:
-        question = text.replace(f"@{bot_username}", "").strip()
-        if not question:
-            return
-        if not is_authorized(message.from_user.id, require_full_access=True):
-            try:
-                await context.bot.send_message(
-                    chat_id=message.chat_id,
-                    text="❌ AI 对话功能仅限管理员和操作员使用\n\n如需使用，请联系 @ChinaEdward 申请权限",
-                    reply_to_message_id=message.message_id
-                )
-            except Exception as e:
-                print(f"[ERROR] 发送权限提示失败: {e}")
-                await message.reply_text("❌ 无权限使用 AI 对话")
-            return
-        thinking_msg = await message.reply_text("🤔 思考中...")
-        from handlers.ai_client import get_ai_client
-        ai_client = get_ai_client()
-        reply = await ai_client.chat_with_data(
-            prompt=question,
-            group_id=str(chat.id),
-            user_id=message.from_user.id
-        )
-        if len(reply) > 4000:
-            reply = reply[:4000] + "...\n\n(回复过长已截断)"
-        await thinking_msg.edit_text(reply)
         return
