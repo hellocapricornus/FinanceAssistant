@@ -71,11 +71,6 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "创建分类 ▫️ 私聊「群组管理」创建分类\n"
         "设置分类 ▫️ 为群组设置分类标签\n\n"
 
-        "<blockquote><b>🤖 AI 对话</b></blockquote>\n"
-        "群内提问 ▫️ <code>@机器人 你的问题</code>临时操作人不可用\n"
-        "私聊提问 ▫️ 直接发送问题\n"
-        "数据查询 ▫️ 支持查询账单、群组、操作员等\n\n"
-
         "<blockquote><b>🧮 计算器</b></blockquote>\n"
         "基础运算 ▫️ <code>100+200</code>\n"
         "复杂运算 ▫️ <code>(10+5)*3</code>\n"
@@ -88,6 +83,8 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "群发附言 ▫️ 设置默认群发签名\n"
         "每日早报 ▫️ 开启/关闭每日早报\n"
         "数据分析 ▫️ 导出数据分析报告\n"
+        "规则管理 ▫️ 管理群组规则\n"
+        "业绩汇总 ▫️ 记录和查看业绩\n"
         "会员系统 ▫️ 升级/续费会员\n\n"
 
         "<blockquote><b>🛡️ 权限等级</b></blockquote>\n"
