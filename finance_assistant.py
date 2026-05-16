@@ -34,14 +34,30 @@ from handlers.group_manager import (
 )
 from handlers.menu import get_main_menu
 from handlers.accounting import get_service_message_handler, get_accounting_manager
-from handlers.ai_client import get_ai_client
 from handlers.help import handle_help
 from handlers.profile import (
     handle_profile, profile_stats, profile_addresses,
     profile_toggle_notify, profile_signature_start, profile_signature_input,
     profile_contact, profile_feedback_start, profile_feedback_input,
     profile_export_data, profile_back, profile_report_toggle,
-    SET_SIGNATURE, FEEDBACK, profile_monitor_group, profile_trial_start, trial_confirm
+    SET_SIGNATURE, FEEDBACK, profile_monitor_group, profile_trial_start, trial_confirm, 
+    profile_rules_menu, profile_rule_add_start, profile_rule_add_name_input,
+    profile_rule_add_content_input, profile_rule_view_all,
+    profile_rule_update_select, profile_rule_update_select_handler,
+    profile_rule_update_content_input, profile_rule_delete_select,
+    profile_rule_delete_handler, profile_rule_global_toggle,
+    profile_rule_detail,
+    RULE_MENU, RULE_ADD_NAME, RULE_ADD_CONTENT, RULE_UPDATE_SELECT,
+    RULE_UPDATE_CONTENT, RULE_DELETE_SELECT, RULE_VIEW,
+)
+from handlers.performance import (
+    performance_menu, performance_record_start, performance_record_input,
+    performance_view_start, performance_view_show, performance_edit_start,
+    performance_edit_input, performance_delete_start, performance_delete_input,
+    performance_export_select, performance_export_do, performance_trace,
+    performance_commission_set, performance_commission_input, performance_cancel,
+    PERFORMANCE_MENU, PERFORMANCE_RECORD, PERFORMANCE_VIEW, PERFORMANCE_MONTH_SELECT,
+    PERFORMANCE_EDIT, PERFORMANCE_DELETE, PERFORMANCE_COMMISSION_SET, PERFORMANCE_COMMISSION_INPUT,
 )
 from handlers.operator import add_admin_cmd, remove_admin_cmd, list_admins_cmd, get_admin_list_text
 from db_manager import close_all_connections, init_admin_db, get_conn, get_db
@@ -569,16 +585,28 @@ async def module_input_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     user_id = update.effective_user.id
     if chat.type != 'private':
         return
+
+    # ✅ 提前获取消息文本
+    text = update.message.text.strip() if update.message.text else ""
+
     if context.user_data.pop("profile_input_state", False):
         return ConversationHandler.END
-    text = update.message.text.strip() if update.message.text else ""
+
+    # ✅ 如果是键盘按钮，清理规则管理状态
     if text in ALL_KNOWN_BUTTONS:
-        return
+        context.user_data.pop("rule_action", None)
+        context.user_data.pop("rule_name", None)
+        context.user_data.pop("profile_input_state", None)
+        return None  # 让 keyboard_handler 处理
+
+    # 🔥 检查规则管理状态
+    if context.user_data.get("rule_action"):
+        return ConversationHandler.END
 
     # ✅ 修改：同时检查用户广播和群发广播状态
     if context.user_data.get("ub_in_broadcast") or context.user_data.get("in_broadcast"):
         return None  # 让广播相关的 ConversationHandler 处理
-        
+
     # 1. 检查群组管理状态
     from handlers.group_manager import user_states
     if user_id in user_states:
@@ -586,6 +614,7 @@ async def module_input_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await handle_text_input(update, context)
         context.user_data["_message_handled"] = True
         return ConversationHandler.END
+
     # 2. 检查监控模块状态
     monitor_action = context.user_data.get("monitor_action")
     if monitor_action == "add":
@@ -599,6 +628,7 @@ async def module_input_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await monitor.monitor_add_note(update, context)
         context.user_data["_message_handled"] = True
         return ConversationHandler.END
+
     # 3. 检查操作员管理状态
     current_action = context.user_data.get("current_action")
     if current_action in [operator.ADD_OPERATOR, operator.REMOVE_OPERATOR, 
@@ -607,6 +637,7 @@ async def module_input_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await operator.handle_input(update, context)
         context.user_data["_message_handled"] = True
         return ConversationHandler.END
+
     # 4. 检查 USDT 地址查询状态
     usdt_session = context.user_data.get("usdt_session")
     if usdt_session and usdt_session.get("waiting_for_address"):
@@ -618,6 +649,7 @@ async def module_input_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("❌ USDT 查询出错，请重试")
         context.user_data["_message_handled"] = True
         return ConversationHandler.END
+
     # 5. 检查互转查询状态
     active_module = context.user_data.get("active_module")
     if active_module == "transfer_query":
@@ -628,63 +660,13 @@ async def module_input_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await transfer.process_transfer_analysis(update, context)
         context.user_data["_message_handled"] = True
         return ConversationHandler.END
+
     # 6. 检查广播模块状态
     if context.user_data.get("in_broadcast", False):
         context.user_data["_message_handled"] = True
         return ConversationHandler.END
+
     return None
-
-# ==================== AI 对话处理器 (group=2) ====================
-async def ai_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
-    user_id = update.effective_user.id
-    if chat.type != 'private':
-        return
-    if context.user_data.pop("profile_input_state", False):
-        return
-    if context.user_data.get("_message_handled"):
-        context.user_data.pop("_message_handled", None)
-        return
-
-    # ✅ 添加：广播状态中不触发 AI
-    if context.user_data.get("ub_in_broadcast"):
-        return
-    
-    text = update.message.text.strip() if update.message.text else ""
-    if text in ALL_KNOWN_BUTTONS or text.startswith('/'):
-        return
-    if any([
-        context.user_data.get("active_module"),
-        context.user_data.get("monitor_action"),
-        context.user_data.get("current_action"),
-        context.user_data.get("in_broadcast"),
-        context.user_data.get("usdt_session"),
-        context.user_data.get("transfer_results"),
-        context.user_data.get("selecting_group"),
-    ]):
-        return
-    from handlers.group_manager import user_states
-    if user_id in user_states:
-        return
-    import re
-    if re.match(r'^T[0-9A-Za-z]{33}\s+T[0-9A-Za-z]{33}$', text):
-        return
-    if not text:
-        return
-    print(f"[AI_CHAT] 进入 AI 对话: {text[:50]}")
-    if not is_authorized(user_id, require_full_access=True):
-        await update.message.reply_text("❌ AI 对话功能仅限管理员和操作员使用\n\n如需使用，请联系 @ChinaEdward 申请权限")
-        return
-    thinking_msg = await update.message.reply_text("🤔 思考中...")
-    try:
-        ai_client = get_ai_client()
-        reply = await ai_client.chat_with_data(text, user_id=user_id)
-        if len(reply) > 4000:
-            reply = reply[:4000] + "...\n\n(回复过长已截断)"
-        await thinking_msg.edit_text(reply)
-    except Exception as e:
-        print(f"[DEBUG] AI 调用失败: {e}")
-        await thinking_msg.edit_text(f"❌ AI 服务出错: {str(e)[:100]}")
 
 # ==================== 菜单显示函数 ====================
 async def show_monitor_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1697,6 +1679,12 @@ def main():
     init_master_db()
     # 初始化操作员缓存
     init_operators_from_db()
+    # ✅ 为所有管理员补建表
+    from db_manager import init_admin_db
+    from auth import admins
+    for admin_id in admins.keys():
+        init_admin_db(admin_id)
+    init_admin_db(OWNER_ID)
     # 创建应用
     # ✅ 启用并发处理
     app = Application.builder() \
@@ -1825,10 +1813,87 @@ def main():
             CallbackQueryHandler(profile_monitor_group, pattern="^profile_monitor_group$"),
             CallbackQueryHandler(profile_trial_start, pattern="^profile_trial_start$"),
             CallbackQueryHandler(trial_confirm, pattern="^trial_confirm$"),
+            # ========== 规则管理入口 ==========
+            CallbackQueryHandler(profile_rules_menu, pattern="^profile_rules_menu$"),
+            CallbackQueryHandler(profile_rule_add_start, pattern="^profile_rule_add$"),
+            CallbackQueryHandler(profile_rule_view_all, pattern="^profile_rule_view_all$"),
+            CallbackQueryHandler(profile_rule_update_select, pattern="^profile_rule_update_select$"),
+            CallbackQueryHandler(profile_rule_delete_select, pattern="^profile_rule_delete_select$"),
+            CallbackQueryHandler(profile_rule_global_toggle, pattern="^profile_rule_global_toggle$"),
+            CallbackQueryHandler(performance_menu, pattern="^profile_performance_menu$"),
         ],
         states={
             SET_SIGNATURE: [MessageHandler(filters.TEXT, profile_signature_input)],
             FEEDBACK: [MessageHandler(filters.TEXT, profile_feedback_input)],
+            # ========== 规则管理状态 ==========
+            RULE_MENU: [
+                CallbackQueryHandler(profile_rule_add_start, pattern="^profile_rule_add$"),
+                CallbackQueryHandler(profile_rule_view_all, pattern="^profile_rule_view_all$"),
+                CallbackQueryHandler(profile_rule_update_select, pattern="^profile_rule_update_select$"),
+                CallbackQueryHandler(profile_rule_delete_select, pattern="^profile_rule_delete_select$"),
+                CallbackQueryHandler(profile_rule_global_toggle, pattern="^profile_rule_global_toggle$"),
+            ],
+            RULE_ADD_NAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, profile_rule_add_name_input),
+                CallbackQueryHandler(profile_rules_menu, pattern="^profile_rules_menu$"),
+            ],
+            RULE_ADD_CONTENT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, profile_rule_add_content_input),
+            ],
+            RULE_UPDATE_SELECT: [
+                CallbackQueryHandler(profile_rule_update_select_handler, pattern="^profile_rule_upd_"),
+                CallbackQueryHandler(profile_rules_menu, pattern="^profile_rules_menu$"),
+            ],
+            RULE_UPDATE_CONTENT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, profile_rule_update_content_input),
+            ],
+            RULE_DELETE_SELECT: [
+                CallbackQueryHandler(profile_rule_delete_handler, pattern="^profile_rule_del_"),
+                CallbackQueryHandler(profile_rules_menu, pattern="^profile_rules_menu$"),
+            ],
+            RULE_VIEW: [
+                CallbackQueryHandler(profile_rule_detail, pattern="^profile_rule_detail_"),
+                CallbackQueryHandler(profile_rules_menu, pattern="^profile_rules_menu$"),
+            ],
+            PERFORMANCE_MENU: [
+                CallbackQueryHandler(performance_record_start, pattern="^perf_record$"),
+                CallbackQueryHandler(performance_view_start, pattern="^perf_view$"),
+                CallbackQueryHandler(performance_edit_start, pattern="^perf_edit$"),
+                CallbackQueryHandler(performance_delete_start, pattern="^perf_delete$"),
+                CallbackQueryHandler(performance_export_select, pattern="^perf_export_select$"),
+                CallbackQueryHandler(performance_trace, pattern="^perf_trace$"),
+                CallbackQueryHandler(performance_commission_set, pattern="^perf_commission_set$"),
+                CallbackQueryHandler(performance_menu, pattern="^perf_menu$"),
+            ],
+            PERFORMANCE_RECORD: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, performance_record_input),
+                CommandHandler("cancel", performance_cancel),
+            ],
+            PERFORMANCE_VIEW: [
+                CallbackQueryHandler(performance_view_start, pattern="^perf_view$"),
+                CallbackQueryHandler(performance_menu, pattern="^perf_menu$"),
+            ],
+            PERFORMANCE_MONTH_SELECT: [
+                CallbackQueryHandler(performance_view_show, pattern="^perf_month_"),
+                CallbackQueryHandler(performance_export_do, pattern="^perf_export_"),
+                CallbackQueryHandler(performance_menu, pattern="^perf_menu$"),
+            ],
+            PERFORMANCE_EDIT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, performance_edit_input),
+                CommandHandler("cancel", performance_cancel),
+            ],
+            PERFORMANCE_DELETE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, performance_delete_input),
+                CommandHandler("cancel", performance_cancel),
+            ],
+            PERFORMANCE_COMMISSION_SET: [
+                CallbackQueryHandler(performance_commission_set, pattern="^perf_commission_set$"),
+                CallbackQueryHandler(performance_menu, pattern="^perf_menu$"),
+            ],
+            PERFORMANCE_COMMISSION_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, performance_commission_input),
+                CommandHandler("cancel", performance_cancel),
+            ],
         },
         fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)],
         per_message=False,
@@ -1838,7 +1903,6 @@ def main():
     # 三层私聊处理器
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, keyboard_handler), group=0)
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, module_input_handler), group=1)
-    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, ai_chat_handler), group=2)
     # 群组消息
     app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND, accounting.handle_group_message), group=1)
     app.add_handler(MessageHandler(filters.ChatType.GROUPS & ~filters.COMMAND, auto_save_group), group=2)
