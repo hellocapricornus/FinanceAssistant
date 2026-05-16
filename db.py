@@ -595,3 +595,430 @@ def get_address_stats(admin_id: int = 0, address: str = ""):
     first = conn.execute("SELECT MIN(query_time) FROM address_query_log WHERE address = ?", (address,)).fetchone()[0]
     last = conn.execute("SELECT MAX(query_time) FROM address_query_log WHERE address = ?", (address,)).fetchone()[0]
     return {'total_queries': total, 'first_query': first, 'last_query': last}
+
+# ==================== 规则管理 ====================
+
+def add_rule(admin_id: int, rule_name: str, rule_content: str, created_by: int) -> bool:
+    """添加新规则（如果已存在但被软删除，则恢复并更新）"""
+    if admin_id == 0:
+        return False
+    conn = get_conn(admin_id)
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        c.execute("SELECT id, is_active FROM rules WHERE rule_name = ?", (rule_name,))
+        existing = c.fetchone()
+        if existing:
+            if existing[1] == 1:
+                return False
+            else:
+                c.execute("""
+                    UPDATE rules SET rule_content = ?, is_active = 1, updated_at = ?, created_by = ?
+                    WHERE rule_name = ?
+                """, (rule_content, now, created_by, rule_name))
+                conn.commit()
+                return True
+        c.execute("""
+            INSERT INTO rules (rule_name, rule_content, created_by, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (rule_name, rule_content, created_by, now, now))
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"添加规则失败: {e}")
+        return False
+    finally:
+        c.close()
+
+def update_rule(admin_id: int, rule_name: str, rule_content: str) -> bool:
+    """更新规则内容"""
+    if admin_id == 0:
+        return False
+    conn = get_conn(admin_id)
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        c.execute("""
+            UPDATE rules SET rule_content = ?, updated_at = ?
+            WHERE rule_name = ? AND is_active = 1
+        """, (rule_content, now, rule_name))
+        conn.commit()
+        return c.rowcount > 0
+    except Exception as e:
+        print(f"更新规则失败: {e}")
+        return False
+    finally:
+        c.close()
+
+def delete_rule(admin_id: int, rule_name: str) -> bool:
+    """软删除规则"""
+    if admin_id == 0:
+        return False
+    conn = get_conn(admin_id)
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        c.execute("UPDATE rules SET is_active = 0, updated_at = ? WHERE rule_name = ?", (now, rule_name))
+        conn.commit()
+        return c.rowcount > 0
+    except Exception as e:
+        print(f"删除规则失败: {e}")
+        return False
+    finally:
+        c.close()
+
+def get_rule(admin_id: int, rule_name: str):
+    """获取单个规则"""
+    if admin_id == 0:
+        return None
+    conn = get_conn(admin_id)
+    c = conn.cursor()
+    try:
+        c.execute("""
+            SELECT id, rule_name, rule_content, created_by, created_at, updated_at, is_active
+            FROM rules WHERE rule_name = ?
+        """, (rule_name,))
+        row = c.fetchone()
+        if row:
+            return {
+                "id": row[0], "rule_name": row[1], "rule_content": row[2],
+                "created_by": row[3], "created_at": row[4],
+                "updated_at": row[5], "is_active": row[6]
+            }
+        return None
+    finally:
+        c.close()
+
+def get_all_rules(admin_id: int, active_only: bool = True) -> list:
+    """获取所有规则"""
+    if admin_id == 0:
+        return []
+    conn = get_conn(admin_id)
+    c = conn.cursor()
+    try:
+        if active_only:
+            c.execute("""
+                SELECT rule_name, rule_content, created_by, created_at, updated_at, is_active
+                FROM rules WHERE is_active = 1 ORDER BY rule_name
+            """)
+        else:
+            c.execute("""
+                SELECT rule_name, rule_content, created_by, created_at, updated_at, is_active
+                FROM rules ORDER BY rule_name
+            """)
+        rows = c.fetchall()
+        return [
+            {"rule_name": r[0], "rule_content": r[1], "created_by": r[2],
+             "created_at": r[3], "updated_at": r[4], "is_active": r[5]}
+            for r in rows
+        ]
+    finally:
+        c.close()
+
+def search_rule(admin_id: int, rule_name: str):
+    """搜索规则并返回内容（用于群组查询）"""
+    if admin_id == 0:
+        return None
+    conn = get_conn(admin_id)
+    c = conn.cursor()
+    try:
+        c.execute("SELECT rule_content FROM rules WHERE rule_name = ? AND is_active = 1", (rule_name,))
+        row = c.fetchone()
+        return row[0] if row else None
+    finally:
+        c.close()
+
+def get_rule_global_status(admin_id: int) -> bool:
+    """获取规则功能的全局状态"""
+    if admin_id == 0:
+        return True
+    conn = get_conn(admin_id)
+    c = conn.cursor()
+    try:
+        c.execute("SELECT value FROM system_settings WHERE key = 'rule_enabled'")
+        row = c.fetchone()
+        return row[0] == '1' if row else True
+    except:
+        return True
+    finally:
+        c.close()
+
+def set_rule_global_status(admin_id: int, enabled: bool) -> bool:
+    """设置规则功能的全局状态"""
+    if admin_id == 0:
+        return False
+    conn = get_conn(admin_id)
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        c.execute("""
+            INSERT OR REPLACE INTO system_settings (key, value, updated_at)
+            VALUES ('rule_enabled', ?, ?)
+        """, ('1' if enabled else '0', now))
+        conn.commit()
+        return True
+    except:
+        return False
+    finally:
+        c.close()
+
+# ==================== 业绩记录管理 ====================
+
+def get_performance_records(admin_id: int, year: int = None, month: int = None) -> list:
+    """获取业绩记录（只获取当前管理员的）"""
+    if admin_id == 0:
+        return []
+
+    from db_manager import get_conn
+    conn = get_conn(admin_id)
+
+    # 确保表存在
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS performance_records (
+            id INTEGER PRIMARY KEY,
+            country TEXT NOT NULL,
+            channel_income REAL NOT NULL,
+            customer_expense REAL NOT NULL,
+            profit REAL NOT NULL,
+            channel_group TEXT DEFAULT '',
+            customer_group TEXT DEFAULT '',
+            channel_employee_id INTEGER NOT NULL,
+            channel_employee_name TEXT DEFAULT '',
+            customer_employee_id INTEGER NOT NULL,
+            customer_employee_name TEXT DEFAULT '',
+            channel_rate REAL DEFAULT 10.0,
+            customer_rate REAL DEFAULT 10.0,
+            created_by INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            admin_id INTEGER DEFAULT 0
+        )
+    """)
+    conn.commit()
+
+    if year and month:
+        date_prefix = f"{year}-{month:02d}"
+        rows = conn.execute(
+            "SELECT * FROM performance_records WHERE date LIKE ? ORDER BY created_at DESC",
+            (f"{date_prefix}%",)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM performance_records ORDER BY created_at DESC"
+        ).fetchall()
+
+    return [dict(row) for row in rows]
+
+
+def get_performance_summary(admin_id: int, year: int, month: int) -> dict:
+    """获取指定月份的业绩汇总"""
+    records = get_performance_records(admin_id, year, month)
+
+    if not records:
+        return {"records": [], "total_profit": 0, "employee_commission": {}, "employee_performance": {}}
+
+    total_profit = sum(r['profit'] for r in records)
+
+    employee_commission = {}
+    employee_performance = {}
+
+    for r in records:
+        profit = r['profit']
+        channel_rate = r.get('channel_rate', 10.0)
+        customer_rate = r.get('customer_rate', 10.0)
+
+        # 通道员工提成
+        ch_id = r['channel_employee_id']
+        ch_name = r['channel_employee_name'] or f"员工{ch_id}"
+        if ch_id not in employee_commission:
+            employee_commission[ch_id] = {"name": ch_name, "commission": 0}
+            employee_performance[ch_id] = {"name": ch_name, "performance": 0}
+        employee_commission[ch_id]["commission"] += profit * channel_rate / 100
+        employee_performance[ch_id]["performance"] += profit / 2
+
+        # 客户员工提成
+        cu_id = r['customer_employee_id']
+        cu_name = r['customer_employee_name'] or f"员工{cu_id}"
+        if cu_id not in employee_commission:
+            employee_commission[cu_id] = {"name": cu_name, "commission": 0}
+            employee_performance[cu_id] = {"name": cu_name, "performance": 0}
+        employee_commission[cu_id]["commission"] += profit * customer_rate / 100
+        employee_performance[cu_id]["performance"] += profit / 2
+
+    return {
+        "records": records,
+        "total_profit": total_profit,
+        "employee_commission": employee_commission,
+        "employee_performance": employee_performance
+    }
+
+
+def get_performance_available_months(admin_id: int) -> list:
+    """获取有业绩记录的月份列表"""
+    if admin_id == 0:
+        return []
+
+    from db_manager import get_conn
+    conn = get_conn(admin_id)
+
+    # 确保表存在
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS performance_records (
+            id INTEGER PRIMARY KEY,
+            country TEXT NOT NULL,
+            channel_income REAL NOT NULL,
+            customer_expense REAL NOT NULL,
+            profit REAL NOT NULL,
+            channel_group TEXT DEFAULT '',
+            customer_group TEXT DEFAULT '',
+            channel_employee_id INTEGER NOT NULL,
+            channel_employee_name TEXT DEFAULT '',
+            customer_employee_id INTEGER NOT NULL,
+            customer_employee_name TEXT DEFAULT '',
+            channel_rate REAL DEFAULT 10.0,
+            customer_rate REAL DEFAULT 10.0,
+            created_by INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            admin_id INTEGER DEFAULT 0
+        )
+    """)
+    conn.commit()
+
+    rows = conn.execute(
+        "SELECT DISTINCT substr(date, 1, 7) as month FROM performance_records ORDER BY month DESC"
+    ).fetchall()
+    return [row[0] for row in rows]
+
+
+def get_performance_record_by_id(admin_id: int, record_id: int):
+    """根据ID获取单条业绩记录"""
+    if admin_id == 0:
+        return None
+
+    from db_manager import get_conn
+    conn = get_conn(admin_id)
+    row = conn.execute("SELECT * FROM performance_records WHERE id = ?", (record_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def add_performance_record(admin_id: int, country: str, channel_income: float, customer_expense: float,
+                           channel_group: str, customer_group: str,
+                           channel_employee_id: int, channel_employee_name: str,
+                           customer_employee_id: int, customer_employee_name: str,
+                           created_by: int) -> bool:
+    """添加业绩记录"""
+    if admin_id == 0:
+        return False
+
+    from db_manager import get_conn
+    conn = get_conn(admin_id)
+
+    # 确保表存在
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS performance_records (
+            id INTEGER PRIMARY KEY,
+            country TEXT NOT NULL,
+            channel_income REAL NOT NULL,
+            customer_expense REAL NOT NULL,
+            profit REAL NOT NULL,
+            channel_group TEXT DEFAULT '',
+            customer_group TEXT DEFAULT '',
+            channel_employee_id INTEGER NOT NULL,
+            channel_employee_name TEXT DEFAULT '',
+            customer_employee_id INTEGER NOT NULL,
+            customer_employee_name TEXT DEFAULT '',
+            channel_rate REAL DEFAULT 10.0,
+            customer_rate REAL DEFAULT 10.0,
+            created_by INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            admin_id INTEGER DEFAULT 0
+        )
+    """)
+    conn.commit()
+
+    profit = channel_income + customer_expense
+    now = int(time.time())
+    from datetime import datetime, timezone, timedelta
+    BEIJING_TZ = timezone(timedelta(hours=8))
+    date_str = datetime.fromtimestamp(now, tz=BEIJING_TZ).strftime('%Y-%m-%d')
+
+    # 获取提成配置
+    from handlers.performance import get_commission_config
+    config = get_commission_config(admin_id)
+    channel_rate = config["channel_rate"]
+    customer_rate = config["customer_rate"]
+
+    # 生成编号
+    date_prefix = datetime.fromtimestamp(now, tz=BEIJING_TZ).strftime('%y%m%d')
+    cursor = conn.execute("SELECT COUNT(*) FROM performance_records WHERE date = ?", (date_str,))
+    count = cursor.fetchone()[0] + 1
+    record_id = int(f"{date_prefix}{count:02d}")
+
+    while True:
+        cursor = conn.execute("SELECT id FROM performance_records WHERE id = ?", (record_id,))
+        if not cursor.fetchone():
+            break
+        count += 1
+        record_id = int(f"{date_prefix}{count:02d}")
+
+    conn.execute("""
+        INSERT INTO performance_records 
+        (id, country, channel_income, customer_expense, profit, channel_group, customer_group,
+         channel_employee_id, channel_employee_name, customer_employee_id, customer_employee_name,
+         channel_rate, customer_rate, created_by, created_at, date, admin_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (record_id, country, channel_income, customer_expense, profit, channel_group, customer_group,
+          channel_employee_id, channel_employee_name, customer_employee_id, customer_employee_name,
+          channel_rate, customer_rate, created_by, now, date_str, admin_id))
+    conn.commit()
+    return True
+
+
+def update_performance_record(admin_id: int, record_id: int, country: str, channel_income: float,
+                              customer_expense: float, channel_group: str, customer_group: str,
+                              channel_employee_id: int, channel_employee_name: str,
+                              customer_employee_id: int, customer_employee_name: str) -> bool:
+    """修改业绩记录"""
+    if admin_id == 0:
+        return False
+
+    from db_manager import get_conn
+    conn = get_conn(admin_id)
+
+    profit = channel_income + customer_expense
+
+    # 获取当前提成配置
+    from handlers.performance import get_commission_config
+    config = get_commission_config(admin_id)
+    channel_rate = config["channel_rate"]
+    customer_rate = config["customer_rate"]
+
+    conn.execute("""
+        UPDATE performance_records 
+        SET country=?, channel_income=?, customer_expense=?, profit=?,
+            channel_group=?, customer_group=?,
+            channel_employee_id=?, channel_employee_name=?,
+            customer_employee_id=?, customer_employee_name=?,
+            channel_rate=?, customer_rate=?
+        WHERE id=?
+    """, (country, channel_income, customer_expense, profit,
+          channel_group, customer_group,
+          channel_employee_id, channel_employee_name,
+          customer_employee_id, customer_employee_name,
+          channel_rate, customer_rate, record_id))
+    conn.commit()
+    return True
+
+
+def delete_performance_record(admin_id: int, record_id: int) -> bool:
+    """删除业绩记录"""
+    if admin_id == 0:
+        return False
+
+    from db_manager import get_conn
+    conn = get_conn(admin_id)
+    conn.execute("DELETE FROM performance_records WHERE id=?", (record_id,))
+    conn.commit()
+    return True
