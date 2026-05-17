@@ -205,13 +205,17 @@ async def _build_profile_menu(user_id: int, prefs: dict = None, display_name: st
     if user_id != OWNER_ID:
         keyboard.append([InlineKeyboardButton("📡 监控群组", callback_data="profile_monitor_group")])
     # ========== 规则管理（仅完整权限可见） ==========
-    if full_access and admin_id != 0:
+    if full_access:
+        # 超级管理员的 admin_id 是 OWNER_ID，不是 0
+        effective_admin_id = admin_id if admin_id != 0 else OWNER_ID
         from db import get_all_rules as db_get_all_rules
-        rules = db_get_all_rules(admin_id, active_only=True)
+        rules = db_get_all_rules(effective_admin_id, active_only=True)
         rule_count = len(rules)
         keyboard.append([InlineKeyboardButton(f"📋 规则管理（{rule_count}个）", callback_data="profile_rules_menu")])
-    # ✅ 添加业绩汇总按钮
-    keyboard.append([InlineKeyboardButton("📊 业绩汇总", callback_data="profile_performance_menu")])
+
+    # ========== 业绩汇总（仅完整权限可见） ==========
+    if full_access:
+        keyboard.append([InlineKeyboardButton("📊 业绩汇总", callback_data="profile_performance_menu")])
     keyboard.append([InlineKeyboardButton("◀️ 返回主菜单", callback_data="profile_back")])
     notify_status = ""
     if full_access and addresses:
