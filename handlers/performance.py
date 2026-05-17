@@ -28,6 +28,20 @@ PERFORMANCE_COMMISSION_INPUT = 177  # 新增：输入提成比例
 # 北京时区
 BEIJING_TZ = timezone(timedelta(hours=8))
 
+async def safe_edit_message(query, text, reply_markup=None, parse_mode=None):
+    """安全编辑消息，忽略 'Message is not modified' 错误"""
+    try:
+        await query.message.edit_text(
+            text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode
+        )
+    except Exception as e:
+        if "not modified" in str(e).lower():
+            pass
+        else:
+            raise
+            
 # ==================== 提成配置管理 ====================
 
 def get_commission_config(admin_id: int) -> dict:
@@ -341,11 +355,17 @@ async def performance_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("➕ 记录业绩", callback_data="perf_record")],
             [InlineKeyboardButton("◀️ 返回个人中心", callback_data="profile_return")],
         ]
-        await query.message.edit_text(
-            text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
-        )
+        try:
+            await query.message.edit_text(
+                text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            if "not modified" in str(e).lower():
+                pass  # 忽略相同内容的编辑
+            else:
+                raise
         return PERFORMANCE_MENU
 
     # 默认显示当前月，如果没有则显示最近一个月
@@ -407,7 +427,8 @@ async def performance_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard.append([InlineKeyboardButton("◀️ 返回个人中心", callback_data="profile_return")])
 
-    await query.message.edit_text(
+    await safe_edit_message(
+        query,
         text,
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="HTML"
@@ -436,22 +457,29 @@ async def performance_commission_set(update: Update, context: ContextTypes.DEFAU
 
     keyboard = [[InlineKeyboardButton("◀️ 返回业绩菜单", callback_data="perf_menu")]]
 
-    await query.message.edit_text(
-        f"⚙️ **设置提成比例**\n\n"
-        f"📊 **当前配置**\n"
-        f"• 通道提成：**{config['channel_rate']}%**\n"
-        f"• 客户提成：**{config['customer_rate']}%**\n\n"
-        f"请输入新的提成比例，格式：`通道比例 客户比例`\n"
-        f"例如：`10 15` 表示通道10%，客户15%\n\n"
-        f"💡 提示：\n"
-        f"• 提成比例是百分比（如10表示10%）\n"
-        f"• 此配置对该公司的**所有员工**生效\n"
-        f"• 修改后，**新记录的业绩**使用新比例\n"
-        f"• **已有业绩**保持原比例不变\n\n"
-        f"❌ 发送 /cancel 取消",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
-    )
+    try:
+        await safe_edit_message(
+            query,
+            f"⚙️ **设置提成比例**\n\n"
+            f"📊 **当前配置**\n"
+            f"• 通道提成：**{config['channel_rate']}%**\n"
+            f"• 客户提成：**{config['customer_rate']}%**\n\n"
+            f"请输入新的提成比例，格式：`通道比例 客户比例`\n"
+            f"例如：`10 15` 表示通道10%，客户15%\n\n"
+            f"💡 提示：\n"
+            f"• 提成比例是百分比（如10表示10%）\n"
+            f"• 此配置对该公司的**所有员工**生效\n"
+            f"• 修改后，**新记录的业绩**使用新比例\n"
+            f"• **已有业绩**保持原比例不变\n\n"
+            f"❌ 发送 /cancel 取消",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        if "not modified" in str(e).lower():
+            pass
+        else:
+            raise
     return PERFORMANCE_COMMISSION_INPUT
 
 
@@ -461,7 +489,28 @@ async def performance_commission_input(update: Update, context: ContextTypes.DEF
     admin_id = get_user_admin_id(user_id)
     text = update.message.text.strip()
 
-    # 检查键盘按钮
+    # ✅ 先检查是否是「返回业绩菜单」按钮
+    if text == "◀️ 返回业绩菜单":
+        # 清理状态
+        context.user_data.pop("perf_action", None)
+        context.user_data.pop("profile_input_state", None)
+
+        # 重新显示业绩菜单
+        from handlers.performance import performance_menu
+        # 创建一个虚拟的 callback_query 来调用 performance_menu
+        class MockQuery:
+            def __init__(self, user_id, message):
+                self.from_user = type('obj', (object,), {'id': user_id})()
+                self.message = message
+            async def answer(self):
+                pass
+
+        mock_query = MockQuery(user_id, update.message)
+        update.callback_query = mock_query
+        await performance_menu(update, context)
+        return ConversationHandler.END
+
+    # ✅ 检查其他键盘按钮（返回主菜单等）
     if _is_keyboard_button(text):
         context.user_data.pop("perf_action", None)
         context.user_data.pop("profile_input_state", None)
@@ -570,26 +619,33 @@ async def performance_record_start(update: Update, context: ContextTypes.DEFAULT
 
     keyboard = [[InlineKeyboardButton("◀️ 返回业绩菜单", callback_data="perf_menu")]]
 
-    await query.message.edit_text(
-        f"➕ **记录业绩**\n\n"
-        f"⚙️ **当前提成配置**\n"
-        f"• 通道提成：{config['channel_rate']}%\n"
-        f"• 客户提成：{config['customer_rate']}%\n\n"
-        "请输入信息，用空格分隔：\n"
-        "`国家 通道收入 客户支出 通道群名 客户群名 @通道员工 @客户员工`\n\n"
-        "例如：\n"
-        "`德国 5000 -3000 德国通道群 德国客户群 @张三 @李四`\n\n"
-        "💡 **说明**：\n"
-        "• 通道收入填正数（如5000）\n"
-        "• 客户支出填负数（如-3000）\n"
-        "• 利润 = 通道收入 + 客户支出\n"
-        "• 员工用 @用户名 或 用户ID\n"
-        "• 只能选择正式操作员\n"
-        f"{employee_list}"
-        "\n❌ 发送 /cancel 取消",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
-    )
+    try:
+        await safe_edit_message(
+            query,
+            f"➕ **记录业绩**\n\n"
+            f"⚙️ **当前提成配置**\n"
+            f"• 通道提成：{config['channel_rate']}%\n"
+            f"• 客户提成：{config['customer_rate']}%\n\n"
+            "请输入信息，用空格分隔：\n"
+            "`国家 通道收入 客户支出 通道群名 客户群名 @通道员工 @客户员工`\n\n"
+            "例如：\n"
+            "`德国 5000 -3000 德国通道群 德国客户群 @张三 @李四`\n\n"
+            "💡 **说明**：\n"
+            "• 通道收入填正数（如5000）\n"
+            "• 客户支出填负数（如-3000）\n"
+            "• 利润 = 通道收入 + 客户支出\n"
+            "• 员工用 @用户名 或 用户ID\n"
+            "• 只能选择正式操作员\n"
+            f"{employee_list}"
+            "\n❌ 发送 /cancel 取消",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        if "not modified" in str(e).lower():
+            pass
+        else:
+            raise
     return PERFORMANCE_RECORD
 
 
@@ -790,7 +846,8 @@ async def performance_view_start(update: Update, context: ContextTypes.DEFAULT_T
 
     keyboard.append([InlineKeyboardButton("◀️ 返回业绩菜单", callback_data="perf_menu")])
 
-    await query.message.edit_text(
+    await safe_edit_message(
+        query,
         "📊 **查看业绩汇总**\n\n请选择月份：",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
@@ -850,7 +907,8 @@ async def performance_view_show(update: Update, context: ContextTypes.DEFAULT_TY
         [InlineKeyboardButton("◀️ 返回业绩汇总", callback_data="perf_menu")]
     ]
 
-    await query.message.edit_text(
+    await safe_edit_message(
+        query,
         text,
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="HTML"
@@ -888,7 +946,8 @@ async def performance_edit_start(update: Update, context: ContextTypes.DEFAULT_T
 
     keyboard = [[InlineKeyboardButton("◀️ 返回业绩菜单", callback_data="perf_menu")]]
 
-    await query.message.edit_text(
+    await safe_edit_message(
+        query,
         f"✏️ **修改业绩**\n\n"
         f"⚙️ **当前提成配置**\n"
         f"• 通道提成：{config['channel_rate']}%\n"
@@ -1070,7 +1129,8 @@ async def performance_delete_start(update: Update, context: ContextTypes.DEFAULT
 
     keyboard = [[InlineKeyboardButton("◀️ 返回业绩菜单", callback_data="perf_menu")]]
 
-    await query.message.edit_text(
+    await safe_edit_message(
+        query,
         "🗑️ **删除业绩**\n\n"
         "请输入要删除的业绩编号：\n"
         "例如：`1`\n\n"
@@ -1172,7 +1232,8 @@ async def performance_export_select(update: Update, context: ContextTypes.DEFAUL
     keyboard.append([InlineKeyboardButton("📥 导出全部", callback_data="perf_export_all")])
     keyboard.append([InlineKeyboardButton("◀️ 返回业绩汇总", callback_data="perf_menu")])
 
-    await query.message.edit_text(
+    await safe_edit_message(
+        query,
         "📥 **导出业绩汇总**\n\n请选择要导出的月份，或导出全部：",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
@@ -1426,7 +1487,8 @@ async def performance_trace(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [[InlineKeyboardButton("◀️ 返回业绩汇总", callback_data="perf_menu")]]
 
-    await query.message.edit_text(
+    await safe_edit_message(
+        query,
         text,
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
