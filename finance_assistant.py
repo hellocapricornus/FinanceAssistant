@@ -909,6 +909,47 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from handlers.profile import trial_confirm
         await trial_confirm(update, context)
         return
+
+    # ========== 业绩汇总 ==========
+    if data == "perf_menu":
+        from handlers.performance import performance_menu
+        await performance_menu(update, context)
+        return
+
+    if data == "perf_record":
+        from handlers.performance import performance_record_start
+        await performance_record_start(update, context)
+        return
+
+    if data == "perf_view":
+        from handlers.performance import performance_view_start
+        await performance_view_start(update, context)
+        return
+
+    if data == "perf_edit":
+        from handlers.performance import performance_edit_start
+        await performance_edit_start(update, context)
+        return
+
+    if data == "perf_delete":
+        from handlers.performance import performance_delete_start
+        await performance_delete_start(update, context)
+        return
+
+    if data == "perf_trace":
+        from handlers.performance import performance_trace
+        await performance_trace(update, context)
+        return
+
+    if data == "perf_export_select":
+        from handlers.performance import performance_export_select
+        await performance_export_select(update, context)
+        return
+
+    if data == "perf_commission_set":
+        from handlers.performance import performance_commission_set
+        await performance_commission_set(update, context)
+        return
     
     # ========== 会员系统 ==========
     if data == "subscription_menu":
